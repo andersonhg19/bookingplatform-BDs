@@ -14,7 +14,7 @@ El backend del equipo está en [`J3rmed/bookingplatform`](https://github.com/J3r
 | [`pruebas-integridad.sql`](pruebas-integridad.sql) | Dieciocho violaciones que la base debe rechazar |
 | [`docker-compose.yml`](docker-compose.yml) | Entorno local con PostgreSQL y pgAdmin |
 | [`docs/modelo-logico.md`](docs/modelo-logico.md) | Análisis de normalización tabla por tabla |
-| [`docs/diagrama-er-v2.drawio`](docs/diagrama-er-v2.drawio) | Diagrama editable |
+| [`docs/diagrama-er.drawio`](docs/diagrama-er.drawio) | Diagrama editable, en cuatro páginas |
 
 ## Cómo probarlo
 
@@ -173,9 +173,9 @@ mantiene sincronizada la copia.
 erDiagram
     cities ||--o{ locations : "ubica"
     organization_categories ||--o{ organizations : "clasifica"
-    organizations ||--|{ locations : "tiene sedes"
-    organizations ||--|{ organization_policies : "versiona reglas"
-    organizations ||--o{ organization_members : "emplea"
+    organizations ||--|{ locations : "tiene sede"
+    organizations ||--|{ organization_policies : "versiona"
+    organizations ||--o{ organization_members : "emplea a"
     organizations ||--o{ account_status_changes : "audita"
     clients ||--o{ account_status_changes : "audita"
 
@@ -333,12 +333,12 @@ erDiagram
 erDiagram
     clients ||--o{ bookings : "reserva"
     organizations ||--o{ bookings : "atiende"
-    services ||--o{ bookings : "es reservado"
+    services ||--o{ bookings : "es reservado en"
     locations ||--o{ bookings : "acoge"
-    organization_policies ||--o{ bookings : "rige congelada"
+    organization_policies ||--o{ bookings : "rige, congelada"
     bookings ||--|{ booking_resources : "ocupa"
     resources ||--o{ booking_resources : "es ocupado por"
-    bookings ||--o{ booking_status_changes : "historia de estados"
+    bookings ||--o{ booking_status_changes : "registra cambio de"
 
     bookings {
         uuid id PK "UK con starts_at ends_at status"
