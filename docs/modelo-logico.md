@@ -303,14 +303,14 @@ borra** con la reserva. Una traza que desaparece cuando se borra lo que traza no
 
 `account_status_changes` existe porque HU-003 pide motivo obligatorio al aprobar, suspender o
 reactivar **cuentas**, no reservas, y `affected_bookings` congela el "informe de reservas afectadas"
-que esa misma HU exige. Un trigger sobre `organizations` y `clients` impide cambiar el estado sin
+que esa misma HU exige. Un trigger sobre `organizations` impide cambiar el estado sin
 dejar la fila correspondiente.
 
 ---
 
 ## 6. Reglas que no se pueden expresar de forma declarativa
 
-PostgreSQL no admite subconsultas dentro de un `check`. Estas tres reglas comparan **entre tablas** y
+PostgreSQL no admite subconsultas dentro de un `check`. Estas cuatro reglas comparan **entre tablas** y
 por eso van en triggers, no en la aplicación: la garantía sigue viviendo en la base.
 
 | Regla | HU | Dónde |
@@ -318,6 +318,6 @@ por eso van en triggers, no en la aplicación: la garantía sigue viviendo en la
 | Un proveedor no activo no es reservable | HU-002 | `fn_bookings_reglas` |
 | Un cliente no verificado no confirma reservas | HU-001 | `fn_bookings_reglas` |
 | Los asistentes de una sesión no superan el cupo del servicio | HU-004 | `fn_bookings_reglas` |
-| Cambiar el estado de una cuenta exige registrar el motivo | HU-003 | `fn_exige_motivo_cuenta` |
+| Cambiar el estado de un proveedor exige registrar el motivo | HU-003 | `fn_exige_motivo_cuenta` |
 
 Los límites que quedan fuera del modelo están declarados en el §7 del [README](../README.md).

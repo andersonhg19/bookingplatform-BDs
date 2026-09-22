@@ -14,7 +14,7 @@ El backend del equipo está en [`J3rmed/bookingplatform`](https://github.com/J3r
 | [`pruebas-integridad.sql`](pruebas-integridad.sql) | Dieciocho violaciones que la base debe rechazar |
 | [`docker-compose.yml`](docker-compose.yml) | Entorno local con PostgreSQL y pgAdmin |
 | [`docs/modelo-logico.md`](docs/modelo-logico.md) | Análisis de normalización tabla por tabla |
-| [`docs/diagrama-er.drawio`](docs/diagrama-er.drawio) | Diagrama editable: modelo completo en una hoja, más tres vistas por dominio |
+| [`docs/diagrama-er.drawio`](docs/diagrama-er.drawio) | Diagrama editable: el modelo completo en una hoja, tres vistas por dominio y las historias de usuario |
 
 ## Cómo probarlo
 
@@ -386,6 +386,15 @@ erDiagram
 
 </details>
 
+Los tres de arriba parten el modelo por dominios para poder leerlo. El modelo entero,
+con las notas de diseño y las historias de usuario en una sola hoja, está en la primera
+página de [`docs/diagrama-er.drawio`](docs/diagrama-er.drawio) y exportado en
+[`docs/der-0-modelo-completo.png`](docs/der-0-modelo-completo.png). Las otras cuatro
+páginas son las mismas vistas por dominio —[identidad](docs/der-1-identidad.png),
+[catálogo](docs/der-2-catalogo.png) y [reservas](docs/der-3-reservas.png)— más
+[las historias de usuario](docs/der-4-historias-de-usuario.png) con los criterios de
+aceptación que originaron cada regla.
+
 ### Las 19 tablas, con sus claves
 
 | Tabla | Clave primaria | Claves foráneas | Para qué |
@@ -544,7 +553,7 @@ Cifras leídas del catálogo de PostgreSQL después de ejecutarlo:
 | CHECK | 3 | 43 |
 | UNIQUE | 2 | 21 |
 | EXCLUDE | 0 | 3 |
-| Triggers | 0 | 8 |
+| Triggers | 0 | 7 |
 | Columnas `not null` | 21 | 123 |
 | Índices | 3 | 65 |
 
@@ -575,7 +584,7 @@ select contype, count(*) from pg_constraint
 | Correo único, también sin distinguir mayúsculas | `uk_clients_email` más índice sobre `lower(email)` | 001 |
 | Formato de correo y teléfono | `ck_clients_email_formato`, `ck_clients_phone_formato` | 001 |
 | Cancelar exige motivo | `ck_bsc_reason` | 003 |
-| Cambiar el estado de una cuenta exige motivo e informe | trigger más `account_status_changes` | 003 |
+| Cambiar el estado de un proveedor exige motivo e informe | trigger más `account_status_changes` | 003 |
 | El historial no se borra con la reserva | `on delete restrict` | 003 |
 | Dos franjas de agenda del mismo recurso no se solapan | `ex_schedules_solape` | enunciado |
 
@@ -652,7 +661,7 @@ son ya el prefijo de una `unique`.
 
 | Criterio | Dónde |
 |---|---|
-| Entidades y relaciones | *Entidades y relaciones*, tres diagramas Mermaid, más el `.drawio` |
+| Entidades y relaciones | *Entidades y relaciones*: tres diagramas Mermaid que GitHub renderiza solo, más la hoja **Modelo completo** del `.drawio` |
 | Preguntas clave | *Preguntas clave del negocio* y `consultas-clave.sql` |
 | Modelo lógico | *Normalización* y `docs/modelo-logico.md` |
 | Modelo físico | `schema.sql` y *Modelo físico* |
