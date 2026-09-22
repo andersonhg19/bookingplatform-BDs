@@ -14,7 +14,7 @@ El backend del equipo está en [`J3rmed/bookingplatform`](https://github.com/J3r
 | [`pruebas-integridad.sql`](pruebas-integridad.sql) | Dieciocho violaciones que la base debe rechazar |
 | [`docker-compose.yml`](docker-compose.yml) | Entorno local con PostgreSQL y pgAdmin |
 | [`docs/modelo-logico.md`](docs/modelo-logico.md) | Análisis de normalización tabla por tabla |
-| [`docs/diagrama-er.drawio`](docs/diagrama-er.drawio) | Diagrama editable, en cuatro páginas |
+| [`docs/diagrama-er.drawio`](docs/diagrama-er.drawio) | Diagrama editable: modelo completo en una hoja, más tres vistas por dominio |
 
 ## Cómo probarlo
 
