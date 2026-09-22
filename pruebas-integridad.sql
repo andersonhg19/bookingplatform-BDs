@@ -1,6 +1,6 @@
 -- =====================================================================
 --  Las reglas de integridad en acción
---  Sprint 1 · Bases de Datos · CodeF@ctory 2026-II
+--  Sprint 1
 --
 --  Las restricciones declaradas en el CREATE TABLE las hace cumplir el
 --  motor, no la aplicación. Cada instrucción de este archivo viola una
@@ -8,6 +8,7 @@
 --
 --  Uso:  psql -f schema.sql -f seed.sql -f pruebas-integridad.sql
 --  Se ejecuta SIN ON_ERROR_STOP para que se vean los dieciocho rechazos.
+--  Usa metacomandos de psql, así que se ejecuta con `psql -f`.
 -- =====================================================================
 
 \set ON_ERROR_STOP off

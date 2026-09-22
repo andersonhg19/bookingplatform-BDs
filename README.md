@@ -475,7 +475,8 @@ cuando se creó. Esa regla de HU-002 queda resuelta en el modelo y no en el cód
 
 ## Normalización
 
-Las 19 tablas cumplen 3FN; 15 llegan a BCNF. El detalle por tabla, con sus dependencias funcionales,
+Las 19 tablas cumplen 3FN y 15 llegan a BCNF; tres se quedan en 3FN por conservar
+clave sustituta junto a la natural, y `booking_resources` es la excepción explicada abajo. El detalle por tabla, con sus dependencias funcionales,
 está en [`docs/modelo-logico.md`](docs/modelo-logico.md). Lo importante:
 
 **Catálogos separados.** `cities`, `organization_categories` y `currencies` salieron como tablas

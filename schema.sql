@@ -1,6 +1,6 @@
 -- =====================================================================
 --  Plataforma de Reservas de Servicios — modelo físico
---  Sprint 1 · Bases de Datos · CodeF@ctory 2026-II
+--  Sprint 1
 --
 --  PostgreSQL 15+ (probado en 16). Compatible con Supabase.
 --  Contra una base vacía crea las 19 tablas sin errores.
@@ -570,7 +570,6 @@ begin
 end $$;
 
 drop trigger if exists tg_organizations_motivo      on organizations;
-drop trigger if exists tg_clients_motivo            on clients;
 drop trigger if exists tg_organizations_updated_at  on organizations;
 drop trigger if exists tg_locations_updated_at      on locations;
 drop trigger if exists tg_services_updated_at       on services;
@@ -585,10 +584,14 @@ create trigger tg_resources_updated_at     before update on resources     for ea
 create trigger tg_bookings_updated_at      before update on bookings      for each row execute function fn_set_updated_at();
 create trigger tg_bookings_reglas          before insert or update on bookings for each row execute function fn_bookings_reglas();
 
--- HU-003: no se puede cambiar el estado de una cuenta sin dejar el motivo
+-- HU-003: no se puede suspender ni reactivar una organización sin motivo.
+--
+-- El trigger se aplica sólo a `organizations`. La misma regla vale para
+-- `clients`, pero ahí no se activa todavía: `ConfirmEmailUseCase` mueve el
+-- estado a ACTIVE al confirmar el correo y ningún caso de uso escribe aún en
+-- `account_status_changes`, así que activarlo rompería HU-001. Se habilita
+-- cuando el módulo de identidad registre el motivo en la misma transacción.
 create trigger tg_organizations_motivo after update of status on organizations
-    for each row execute function fn_exige_motivo_cuenta();
-create trigger tg_clients_motivo        after update of status on clients
     for each row execute function fn_exige_motivo_cuenta();
 
 

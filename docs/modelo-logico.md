@@ -21,9 +21,11 @@ Marco de referencia: las definiciones del curso (decks de Francisco Moreno, `Pre
 | 3FN | 3 |
 | 2FN por decisión documentada | 1 (`booking_resources`) |
 
-Las 19 tablas cumplen el mínimo de 3FN que pide la rúbrica. La excepción es `booking_resources`,
-cuya violación de 2FN es deliberada, está justificada y está garantizada por el motor, no confiada
-a la aplicación. Ver §5.
+Las 19 tablas cumplen el mínimo de 3FN que pide la rúbrica. Quince alcanzan BCNF; tres se quedan
+en 3FN porque conservan clave primaria sustituta junto a la natural declarada como `unique`
+(`organization_members`, `service_resource_requirements`, `schedules`). La excepción real es
+`booking_resources`, cuya violación de 2FN es deliberada, está justificada y está garantizada por
+el motor, no confiada a la aplicación. Ver §5.
 
 ---
 

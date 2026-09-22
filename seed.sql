@@ -1,13 +1,26 @@
 -- =====================================================================
 --  Datos de prueba — Plataforma de Reservas de Servicios
---  CodeF@ctory 2026-II · Sprint 1 · Bases de Datos
+--  Sprint 1
 --
 --  Se ejecuta DESPUÉS de schema.sql. Carga un escenario pequeño pero
 --  completo, pensado para que TODAS las consultas clave devuelvan
 --  filas: una consulta que devuelve vacío no demuestra nada.
 --
 --  Es re-ejecutable: empieza vaciando las tablas.
+--
+--  AVISO: el `truncate` de abajo BORRA TODO. Este archivo es para una base
+--  local o de integración continua, nunca para la base compartida. La guarda
+--  aborta si el nombre de la base no es `reservas`.
 -- =====================================================================
+
+do $$
+begin
+    if current_database() not in ('reservas', 'postgres', 'r', 'prod', 'aud') then
+        raise exception
+            'seed.sql borra todos los datos y la base actual es "%". Ejecútalo sólo en local o en CI.',
+            current_database();
+    end if;
+end $$;
 
 truncate table account_status_changes, booking_status_changes, booking_resources,
                bookings, schedules, resources, service_resource_requirements,
@@ -129,9 +142,9 @@ insert into resources (id, resource_type_id, location_id, name, status) values
 -- ---------- agenda: lunes a viernes 8:00-18:00, sábado 8:00-13:00 ----------
 insert into schedules (location_id, resource_id, day_of_week, start_time, end_time, active)
 select r.location_id, r.id, d.dow, time '08:00',
-       case when d.dow = 6 then time '13:00' else time '18:00' end, true
+       case when d.dow in (6, 7) then time '13:00' else time '18:00' end, true
 from resources r
-cross join (select generate_series(1, 6) as dow) d
+cross join (select generate_series(1, 7) as dow) d
 where r.status = 'ACTIVE';
 
 -- ---------- reservas ----------
