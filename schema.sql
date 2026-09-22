@@ -3,7 +3,7 @@
 --  Sprint 1 · Bases de Datos · CodeF@ctory 2026-II
 --
 --  PostgreSQL 15+ (probado en 16). Compatible con Supabase.
---  Contra una base vacía crea las 20 tablas sin errores.
+--  Contra una base vacía crea las 19 tablas sin errores.
 --
 --  También corre contra una base que ya tenga `clients` y
 --  `login_attempts` del mapeo JPA: esas dos se saltan, y sus
@@ -64,8 +64,13 @@ create table if not exists currencies (
 -- =====================================================================
 --  Identidad
 --  Las credenciales viven en auth.users de Supabase, que este script no
---  crea. Por eso clients.id, user_profiles.user_id y
---  organization_members.user_id no tienen clave foránea declarada.
+--  crea. Por eso clients.id, organization_members.user_id y
+--  account_status_changes.changed_by no tienen clave foránea declarada.
+--
+--  El perfil del personal de una organización tampoco vive aquí: de un
+--  miembro sólo guardamos la membresía y el rol, y sus datos personales
+--  quedan en auth.users. Duplicarlos en una tabla propia repetiría lo
+--  que clients ya modela para el cliente final.
 -- =====================================================================
 
 -- clients: ya implementada por el equipo (ClientEntity).
@@ -138,30 +143,6 @@ create table if not exists login_attempts (
     constraint pk_login_attempts primary key (id)
 );
 
--- user_profiles: la generalización que diseñó el equipo. Cubre a los
--- miembros de una organización y a los clientes finales; cuando se
--- implemente absorbe a clients.
-create table if not exists user_profiles (
-    id              uuid         primary key default gen_random_uuid(),
-    user_id         uuid         not null,
-    document_type   varchar(20)  not null,
-    document_number varchar(30)  not null,
-    first_name      varchar(80)  not null,
-    last_name       varchar(80)  not null,
-    phone           varchar(20)  not null,
-    birth_date      date         not null,
-    city_id         uuid         not null,
-    status          varchar(30)  not null,
-    created_at      timestamptz  not null default now(),
-    updated_at      timestamptz  not null default now(),
-    constraint uk_user_profiles_user_id   unique (user_id),
-    constraint uk_user_profiles_document  unique (document_type, document_number),
-    constraint fk_user_profiles_city      foreign key (city_id) references cities (id) on delete restrict,
-    constraint ck_user_profiles_doc_type  check (document_type in ('CC', 'CE', 'PASAPORTE', 'OTRO')),
-    constraint ck_user_profiles_status    check (status in ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED')),
-    constraint ck_user_profiles_phone     check (phone ~ '^\+?[0-9]{7,15}$')
-);
-
 
 -- =====================================================================
 --  Organización (HU-002, HU-003)
@@ -181,9 +162,6 @@ create table if not exists organizations (
     updated_at    timestamptz  not null default now(),
 
     constraint uk_organizations_nit unique (nit),                 -- HU-002: NIT único
-    -- Clave alterna: habilita las CF compuestas que impiden mezclar
-    -- organizaciones en una misma reserva.
-    constraint uk_organizations_id_self unique (id, status),
 
     constraint fk_organizations_category foreign key (category_id) references organization_categories (id) on delete restrict,
 
@@ -597,7 +575,6 @@ drop trigger if exists tg_organizations_updated_at  on organizations;
 drop trigger if exists tg_locations_updated_at      on locations;
 drop trigger if exists tg_services_updated_at       on services;
 drop trigger if exists tg_resources_updated_at      on resources;
-drop trigger if exists tg_user_profiles_updated_at  on user_profiles;
 drop trigger if exists tg_bookings_updated_at       on bookings;
 drop trigger if exists tg_bookings_reglas           on bookings;
 
@@ -605,7 +582,6 @@ create trigger tg_organizations_updated_at before update on organizations for ea
 create trigger tg_locations_updated_at     before update on locations     for each row execute function fn_set_updated_at();
 create trigger tg_services_updated_at      before update on services      for each row execute function fn_set_updated_at();
 create trigger tg_resources_updated_at     before update on resources     for each row execute function fn_set_updated_at();
-create trigger tg_user_profiles_updated_at before update on user_profiles for each row execute function fn_set_updated_at();
 create trigger tg_bookings_updated_at      before update on bookings      for each row execute function fn_set_updated_at();
 create trigger tg_bookings_reglas          before insert or update on bookings for each row execute function fn_bookings_reglas();
 
@@ -629,7 +605,6 @@ create unique index if not exists ux_organization_policies_vigente
     on organization_policies (organization_id) where replaced_at is null;
 
 -- FK no cubiertas por el prefijo de una UNIQUE
-create index if not exists ix_user_profiles_city         on user_profiles (city_id);
 create index if not exists ix_organization_members_user  on organization_members (user_id);
 create index if not exists ix_locations_city             on locations (city_id);
 create index if not exists ix_services_currency          on services (currency_id);
@@ -664,7 +639,6 @@ comment on table organization_categories       is 'Catálogo de categorías de n
 comment on table currencies                    is 'Monedas en código ISO 4217. La baja es lógica (active), nunca física';
 comment on table clients                       is 'Sprint 1 · IMPLEMENTADO. Perfil de cliente (HU-001); id = auth.users.id de Supabase';
 comment on table login_attempts                is 'Sprint 1 · IMPLEMENTADO. Intentos de login para el bloqueo por cuenta (HU-021)';
-comment on table user_profiles                 is 'Sprint 2 · OBJETIVO. Perfil unificado de miembros de organización y clientes; absorbe a clients';
 comment on table organizations                 is 'Negocio proveedor (HU-002). Queda PENDING_APPROVAL hasta que un administrador lo valide';
 comment on table organization_members          is 'Relación N:M entre personas y organizaciones, con el rol de cada quien';
 comment on table organization_policies         is 'Reglas de operación VERSIONADAS (HU-002). Cada cambio crea una versión; las reservas conservan la suya';
@@ -680,7 +654,7 @@ comment on table booking_resources             is 'Recursos ocupados. El EXCLUDE
 comment on table booking_status_changes        is 'Historia de estados de una RESERVA, con motivo obligatorio al cancelar';
 comment on table account_status_changes        is 'Historia de estados de CUENTAS: aprobar, suspender y reactivar exigen motivo (HU-003)';
 
-comment on column clients.city                      is 'Texto libre. En user_profiles pasa a ser city_id hacia el catálogo cities';
+comment on column clients.city                      is 'Texto libre, heredado del mapeo JPA. El catálogo cities sí se usa en locations';
 comment on column locations.timezone                is 'Nulo = hereda la de la organización. Es un override explícito, no una copia de la ciudad';
 comment on column services.customer_capacity        is 'Cupo por sesión. 1 = individual; mayor que 1 = grupal (HU-004)';
 comment on column services.preparation_minutes      is 'Minutos de alistamiento antes de prestar el servicio';

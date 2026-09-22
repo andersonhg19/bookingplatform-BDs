@@ -13,7 +13,7 @@ truncate table account_status_changes, booking_status_changes, booking_resources
                bookings, schedules, resources, service_resource_requirements,
                service_locations, services, resource_types, locations,
                organization_policies, organization_members, organizations,
-               user_profiles, login_attempts, clients,
+               login_attempts, clients,
                currencies, organization_categories, cities
         restart identity cascade;
 
@@ -51,11 +51,6 @@ insert into login_attempts (email, success, attempted_at) values
     ('laura@example.com',    false, now() - interval '1 minutes'),
     ('laura@example.com',    false, now() - interval '30 seconds'),
     ('anderson@example.com', true,  now() - interval '10 minutes');
-
--- ---------- perfiles unificados (Sprint 2, objetivo) ----------
-insert into user_profiles (id, user_id, document_type, document_number, first_name, last_name, phone, birth_date, city_id, status) values
-    ('55555555-0000-0000-0000-000000000001', '99999999-0000-0000-0000-000000000001', 'CC', '71234567', 'Jefferson', 'Lizarazo', '3011112222', '1998-02-14', '11111111-0000-0000-0000-000000000001', 'ACTIVE'),
-    ('55555555-0000-0000-0000-000000000002', '99999999-0000-0000-0000-000000000002', 'CC', '43219876', 'Marcela',   'Gómez',    '3012223333', '1990-11-08', '11111111-0000-0000-0000-000000000002', 'ACTIVE');
 
 -- ---------- organizaciones ----------
 insert into organizations (id, category_id, name, nit, contact_email, contact_phone, timezone, status, approved_at, created_at, updated_at) values

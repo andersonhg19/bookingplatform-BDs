@@ -17,13 +17,13 @@ Marco de referencia: las definiciones del curso (decks de Francisco Moreno, `Pre
 
 | Forma normal alcanzada | Tablas |
 |---|---|
-| **BCNF** | 16 |
-| **3FN** | 3 |
-| **2FN por decisión documentada** | 1 (`booking_resources`) |
+| BCNF | 15 |
+| 3FN | 3 |
+| 2FN por decisión documentada | 1 (`booking_resources`) |
 
-**Las 20 tablas cumplen el mínimo de 3FN que exige la rúbrica**, salvo `booking_resources`, cuya
-violación de 2FN es deliberada, está justificada y —lo importante— está **garantizada por el
-motor**, no confiada a la aplicación. Ver §4.
+Las 19 tablas cumplen el mínimo de 3FN que pide la rúbrica. La excepción es `booking_resources`,
+cuya violación de 2FN es deliberada, está justificada y está garantizada por el motor, no confiada
+a la aplicación. Ver §5.
 
 ---
 
@@ -84,7 +84,7 @@ Tres claves candidatas declaradas: `{id}`, `{email}`, `{document}`. **BCNF.**
 
 `city` es texto libre, pero como **no** se guarda el departamento, no arrastra la dependencia
 `city → region` que la sacaría de 3FN. Es un problema de calidad de dominio (`'Medellín'` y
-`'Medellin'` conviven), no de normalización. Se corrige en `user_profiles`, que usa `city_id`.
+`'Medellin'` podrían convivir), no de normalización. `locations` sí usa el catálogo `cities`.
 
 La tabla no se modifica: es trabajo entregado y en producción. Lo único que se le añadió son
 restricciones —que Hibernate ignora al validar— y un índice único sobre `lower(email)`, porque el
@@ -97,14 +97,6 @@ Relación de eventos. `id` determina todo y no hay ningún otro determinante. **
 
 No se relaciona con `clients` a propósito: registra intentos con correos que pueden no corresponder a
 ninguna cuenta, que es justamente lo que interesa vigilar.
-
-### `user_profiles` — Sprint 2, objetivo
-
-Claves candidatas: `{id}`, `{user_id}`, `{document_type, document_number}`, las tres con `unique`.
-`city_id` es una clave foránea y no determina ningún otro atributo. **BCNF.**
-
-La clave de documento incluye el **tipo**: una cédula 12345 y un pasaporte 12345 son personas
-distintas. `clients` no hace esta distinción — es una de las deudas que `user_profiles` salda.
 
 ---
 

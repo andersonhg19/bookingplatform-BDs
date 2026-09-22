@@ -8,7 +8,7 @@ El backend del equipo está en [`J3rmed/bookingplatform`](https://github.com/J3r
 
 | Archivo | Qué es |
 |---|---|
-| [`schema.sql`](schema.sql) | Modelo físico, 20 tablas, ejecutable en PostgreSQL 15+ y Supabase |
+| [`schema.sql`](schema.sql) | Modelo físico, 19 tablas, ejecutable en PostgreSQL 15+ y Supabase |
 | [`seed.sql`](seed.sql) | Datos de prueba |
 | [`consultas-clave.sql`](consultas-clave.sql) | Las once preguntas de negocio |
 | [`docker-compose.yml`](docker-compose.yml) | Entorno local con PostgreSQL y pgAdmin |
@@ -24,7 +24,7 @@ docker compose up -d
 Levanta PostgreSQL 16 en `localhost:5432` con el esquema y los datos ya cargados, y pgAdmin en
 <http://localhost:8080>. Las credenciales están en el `docker-compose.yml`: son de desarrollo local.
 
-El healthcheck del contenedor no mira si el proceso vive, mira si existen las 20 tablas. Si el
+El healthcheck del contenedor no mira si el proceso vive, mira si existen las 19 tablas. Si el
 servicio queda en `healthy`, el DDL corrió sin errores.
 
 Para correr las consultas:
@@ -45,7 +45,7 @@ parte, y las dos cosas no coincidían. Lo que hice fue unirlas y completar lo qu
 |---|---|---|
 | v1.0 | Diagrama de diseño del equipo | 12 entidades, sin reservas |
 | v1.5 | Lo que desarrollo implementó en Java | `clients` y `login_attempts` |
-| v2.0 | Este modelo | 20 tablas |
+| v2.0 | Este modelo | 19 tablas |
 
 **Lo que estaba implementado no se tocó.** `clients` y `login_attempts` se reproducen con los mismos
 nombres, tipos y largos que genera el mapeo JPA, incluido el `timestamp(6)` sin zona horaria. El
@@ -56,7 +56,6 @@ arranque en producción. Lo único que les añadí son restricciones, que Hibern
 
 | Dónde | Decía | Dice |
 |---|---|---|
-| `UserProfile.document_number` | `UUIDv7` | `varchar(30)`, es una cédula |
 | `OrganizationPolicy.booking_notice_minutes_min` | `INTEGEER` | `integer` |
 | `Service.preparation_minutes` | descripción: `TODO` | descrita, más `cleanup_minutes` |
 | `ResourceType.organization_id` | "Id del servicio" | "Id de la organización" |
@@ -67,25 +66,27 @@ arranque en producción. Lo único que les añadí son restricciones, que Hibern
 | Nota de `ResourceType` | "fungibles y no consumibles" | "no consumibles"; fungible significa consumible |
 | `OrganizationMember.user_id → User.id` | pata de gallo invertida | `User (1) → OrganizationMember (N)` |
 | `Service → ServiceResourceRequirement` | apuntaba a la clave primaria | apunta a `service_id` |
-| `UserProfile ↔ User` | 1:1 obligatorio, desde la PK | `User (1) → UserProfile (0..1)` |
 
-Ninguna entidad se renombró ni se eliminó. Las nuevas son `service_locations`, `resources`,
-`schedules`, `bookings`, `booking_resources`, `booking_status_changes` y `account_status_changes`;
-sin ellas no se puede responder en qué sede se presta un servicio, qué recurso queda ocupado, qué
-horarios hay, ni qué reservas existen.
+Ninguna entidad se renombró. La única que saqué es `UserProfile`, porque se solapaba entera con
+`clients` y tener dos tablas para la misma persona es una anomalía de actualización; lo explico más
+abajo.
+
+Las nuevas son `service_locations`, `resources`, `schedules`, `bookings`, `booking_resources`,
+`booking_status_changes` y `account_status_changes`. Sin ellas no se puede responder en qué sede se
+presta un servicio, qué recurso queda ocupado, qué horarios hay, ni qué reservas existen.
 
 ## Entidades y relaciones
 
-Son 20 tablas. Las partí en tres vistas porque todas juntas quedan ilegibles.
+Son 19 tablas. Las partí en tres vistas porque todas juntas quedan ilegibles.
 
 `auth.users` la gestiona Supabase Auth y no se crea en `schema.sql`; por eso `clients.id`,
-`user_profiles.user_id` y `organization_members.user_id` no tienen clave foránea declarada.
+`organization_members.user_id` y `account_status_changes.changed_by` no tienen clave foránea
+declarada.
 
 ### Identidad y organización
 
 ```mermaid
 erDiagram
-    cities ||--o{ user_profiles : "reside en"
     cities ||--o{ locations : "ubica"
     organization_categories ||--o{ organizations : "clasifica"
     organizations ||--|{ locations : "tiene sedes"
@@ -116,18 +117,6 @@ erDiagram
         varchar email
         boolean success
         timestamp attempted_at
-    }
-    user_profiles {
-        uuid id PK
-        uuid user_id UK "= auth.users.id"
-        varchar document_type "UK con document_number"
-        varchar document_number
-        varchar first_name
-        varchar last_name
-        varchar phone
-        date birth_date
-        uuid city_id FK
-        varchar status
     }
     organization_categories {
         uuid id PK
@@ -330,15 +319,16 @@ cuando se creó. Esa regla de HU-002 queda resuelta en el modelo y no en el cód
 
 ## Normalización
 
-Las 20 tablas cumplen 3FN; 16 llegan a BCNF. El detalle por tabla, con sus dependencias funcionales,
+Las 19 tablas cumplen 3FN; 15 llegan a BCNF. El detalle por tabla, con sus dependencias funcionales,
 está en [`docs/modelo-logico.md`](docs/modelo-logico.md). Lo importante:
 
 **Catálogos separados.** `cities`, `organization_categories` y `currencies` salieron como tablas
 propias. Sin eso, ciudad, categoría y moneda serían texto repetido, que es justo lo que pasa hoy en
-`clients.city`, donde conviven `'Medellín'` y `'Medellin'` como si fueran dos ciudades distintas.
+`clients.city`, que es texto libre y donde pueden convivir `'Medellín'` y `'Medellin'` como si
+fueran dos ciudades distintas. `locations` sí usa el catálogo.
 
 **Cada dependencia funcional tiene su restricción.** Una dependencia que el diseño supone pero el
-esquema no garantiza no existe. Por eso hay 24 `unique` además de las claves primarias.
+esquema no garantiza no existe. Por eso hay 21 `unique` además de las claves primarias.
 
 **Coherencia entre organizaciones.** Antes se podía reservar el servicio de una organización, en la
 sede de otra, bajo la política de una tercera. `bookings` lleva `organization_id` y tres claves
@@ -371,13 +361,16 @@ desincronizarlas a mano falla con violación de clave foránea.
 `services.price` puede cambiar, la dependencia `service_id → total_price` no se cumple en esta
 relación: es el precio que el cliente pactó, no una copia del precio de catálogo.
 
-### Por qué conviven `clients` y `user_profiles`
+### Una sola tabla de perfil
 
-Son la misma persona en dos momentos del proyecto. `clients` es el perfil implementado hoy y es el
-que `bookings` referencia. `user_profiles` es la generalización que diseñó el equipo: absorbe a
-`clients` y además cubre a los miembros de una organización, que hoy no tienen dónde guardar sus
-datos. No las unifiqué porque hacerlo obliga a cambiar el mapeo JPA, y eso le corresponde al rol de
-desarrollo.
+El diagrama de diseño traía `UserProfile` como generalización de `clients`, pensada para cubrir
+también al personal de las organizaciones. Dejé solo `clients`, que es la que está implementada y la
+que `bookings` referencia: dos tablas para la misma persona son una anomalía de actualización, y los
+datos podrían quedar distintos en cada una.
+
+Del personal de una organización guardo la membresía y el rol en `organization_members`. Sus datos
+personales viven en `auth.users` de Supabase, que es donde ya están, así que replicarlos aquí sería
+repetir lo que `clients` ya modela para el cliente final.
 
 ## Modelo físico
 
@@ -389,14 +382,14 @@ Cifras leídas del catálogo de PostgreSQL después de ejecutarlo:
 
 | | Antes | Ahora |
 |---|---|---|
-| Tablas | 2 | 20 |
-| Claves foráneas | 0 | 27 |
-| CHECK | 3 | 46 |
-| UNIQUE | 2 | 24 |
+| Tablas | 2 | 19 |
+| Claves foráneas | 0 | 26 |
+| CHECK | 3 | 43 |
+| UNIQUE | 2 | 21 |
 | EXCLUDE | 0 | 3 |
-| Triggers | 0 | 9 |
-| Columnas `not null` | 21 | 135 |
-| Índices | 3 | 70 |
+| Triggers | 0 | 8 |
+| Columnas `not null` | 21 | 123 |
+| Índices | 3 | 65 |
 
 ```sql
 select contype, count(*) from pg_constraint
