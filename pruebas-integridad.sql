@@ -7,7 +7,7 @@
 --  regla de negocio a propósito, y todas deben ser rechazadas.
 --
 --  Uso:  psql -f schema.sql -f seed.sql -f pruebas-integridad.sql
---  Se ejecuta SIN ON_ERROR_STOP para que se vean los quince rechazos.
+--  Se ejecuta SIN ON_ERROR_STOP para que se vean los dieciocho rechazos.
 -- =====================================================================
 
 \set ON_ERROR_STOP off
@@ -135,7 +135,7 @@ insert into clients values (gen_random_uuid(), 'Correo Malo', '8888', '1990-01-0
 \echo ''
 \echo '--- 17. Clave candidata: el mismo correo con otra capitalización (HU-001) ---'
 insert into clients values (gen_random_uuid(), 'Clon', '9999', '1990-01-01',
-                           'ANDERSON@example.com', '3009998877', 'Medellín', 'EMAIL', 'ACTIVE',
+                           'MARIANA@example.com', '3009998877', 'Medellín', 'EMAIL', 'ACTIVE',
                            localtimestamp, localtimestamp);
 
 

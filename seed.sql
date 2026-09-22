@@ -36,7 +36,7 @@ insert into currencies (id, code, name) values
 -- created_at / updated_at son timestamp(6) sin default: los pone el
 -- auditor de Spring Data. Aquí se cargan explícitamente.
 insert into clients (id, full_name, document, birth_date, email, phone, city, notification_channel, status, created_at, updated_at) values
-    ('44444444-0000-0000-0000-000000000001', 'Anderson Herrera', '1017245801', '1999-04-12', 'anderson@example.com', '3001112233', 'Medellín', 'EMAIL',    'ACTIVE',               now() - interval '90 days', now() - interval '90 days'),
+    ('44444444-0000-0000-0000-000000000001', 'Mariana Ospina', '1017245801', '1999-04-12', 'mariana@example.com', '3001112233', 'Medellín', 'EMAIL',    'ACTIVE',               now() - interval '90 days', now() - interval '90 days'),
     ('44444444-0000-0000-0000-000000000002', 'Laura Restrepo',   '1020334455', '2001-09-30', 'laura@example.com',    '3002223344', 'Envigado', 'WHATSAPP', 'ACTIVE',               now() - interval '45 days', now() - interval '45 days'),
     ('44444444-0000-0000-0000-000000000003', 'Camilo Zapata',    '1015667788', '1995-01-20', 'camilo@example.com',   '3003334455', 'Medellín', 'SMS',      'ACTIVE',               now() - interval '20 days', now() - interval '20 days'),
     ('44444444-0000-0000-0000-000000000004', 'Sara Betancur',    '1011223344', '1997-07-07', 'sara@example.com',     '3005556677', 'Medellín', 'EMAIL',    'ACTIVE',               now() - interval '15 days', now() - interval '15 days'),
@@ -50,7 +50,7 @@ insert into login_attempts (email, success, attempted_at) values
     ('laura@example.com',    false, now() - interval '2 minutes'),
     ('laura@example.com',    false, now() - interval '1 minutes'),
     ('laura@example.com',    false, now() - interval '30 seconds'),
-    ('anderson@example.com', true,  now() - interval '10 minutes');
+    ('mariana@example.com', true,  now() - interval '10 minutes');
 
 -- ---------- organizaciones ----------
 insert into organizations (id, category_id, name, nit, contact_email, contact_phone, timezone, status, approved_at, created_at, updated_at) values
