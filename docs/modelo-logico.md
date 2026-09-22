@@ -87,9 +87,14 @@ Tres claves candidatas declaradas: `{id}`, `{email}`, `{document}`. **BCNF.**
 `'Medellin'` podrían convivir), no de normalización. `locations` sí usa el catálogo `cities`.
 
 La tabla no se modifica: es trabajo entregado y en producción. Lo único que se le añadió son
-restricciones —que Hibernate ignora al validar— y un índice único sobre `lower(email)`, porque el
-`unique` original distingue mayúsculas y eso permitía registrar la misma persona dos veces y saltarse
-el bloqueo por intentos fallidos de HU-021 escribiendo el correo con otra capitalización.
+restricciones, que Hibernate ignora al validar, y un índice único sobre `lower(email)`.
+
+Ese índice es defensa en profundidad, no la corrección de un fallo. La aplicación ya normaliza el
+correo a minúsculas antes de guardarlo y consulta con `IgnoreCase`, así que por la vía normal no
+entran duplicados. Pero `uk_clients_email unique (email)` distingue mayúsculas, de modo que la
+garantía depende de que la aplicación se acuerde de normalizar: una carga masiva, una migración o
+un cliente nuevo podrían meter `Ana@x.com` junto a `ana@x.com`. Con el índice funcional, la
+restricción deja de depender del código.
 
 ### `login_attempts` — Sprint 1, implementado
 

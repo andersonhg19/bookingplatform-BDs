@@ -10,7 +10,8 @@ El backend del equipo está en [`J3rmed/bookingplatform`](https://github.com/J3r
 |---|---|
 | [`schema.sql`](schema.sql) | Modelo físico, 19 tablas, ejecutable en PostgreSQL 15+ y Supabase |
 | [`seed.sql`](seed.sql) | Datos de prueba |
-| [`consultas-clave.sql`](consultas-clave.sql) | Las once preguntas de negocio |
+| [`consultas-clave.sql`](consultas-clave.sql) | Las catorce preguntas de negocio |
+| [`pruebas-integridad.sql`](pruebas-integridad.sql) | Dieciocho violaciones que la base debe rechazar |
 | [`docker-compose.yml`](docker-compose.yml) | Entorno local con PostgreSQL y pgAdmin |
 | [`docs/modelo-logico.md`](docs/modelo-logico.md) | Análisis de normalización tabla por tabla |
 | [`docs/diagrama-er-v2.drawio`](docs/diagrama-er-v2.drawio) | Diagrama editable |
@@ -82,6 +83,89 @@ Son 19 tablas. Las partí en tres vistas porque todas juntas quedan ilegibles.
 `auth.users` la gestiona Supabase Auth y no se crea en `schema.sql`; por eso `clients.id`,
 `organization_members.user_id` y `account_status_changes.changed_by` no tienen clave foránea
 declarada.
+
+### El esquema de un vistazo
+
+```
+   IDENTIDAD                       ORGANIZACIÓN                     CATÁLOGO DE SERVICIOS
+   ---------                       ------------                     ---------------------
+   clients                         organizations                    services
+   -------                         -------------                    --------
+   id              (PK)            id               (PK)            id                 (PK)
+   full_name                       category_id      (FK)            organization_id    (FK)
+   document        (UK)            name                             name               (UK con org)
+   birth_date                      nit              (UK)            description
+   email           (UK)            contact_email                    duration_minutes
+   phone                           contact_phone                    preparation_minutes
+   city                            timezone                         cleanup_minutes
+   notification_channel            status                           price
+   status                          approved_at                      currency_id        (FK)
+   created_at                      created_at                       customer_capacity
+   updated_at                      updated_at                       status
+
+   login_attempts                  organization_members             service_locations
+   --------------                  --------------------             -----------------
+   id              (PK)            id               (PK)            service_id      (PK,FK)
+   email                           organization_id  (FK)            location_id     (PK,FK)
+   success                         user_id                          organization_id (FK)
+   attempted_at                    role
+                                                                    resource_types
+   cities                          organization_policies            --------------
+   ------                          ---------------------            id                 (PK)
+   id              (PK)            id               (PK)            organization_id    (FK)
+   name            (UK con region) organization_id  (FK)            name               (UK con org)
+   region                          version          (UK con org)    description
+                                   booking_notice_minutes_min
+   organization_categories         booking_notice_minutes_max       service_resource_requirements
+   -----------------------         free_cancellation_window_minutes -----------------------------
+   id              (PK)            effective_from                   id                 (PK)
+   name            (UK)            replaced_at                      service_id         (FK)
+                                                                    resource_type_id   (FK)
+   currencies                      locations                        organization_id    (FK)
+   ----------                      ---------                        quantity_required
+   id              (PK)            id               (PK)
+   code            (UK)            organization_id  (FK)            resources
+   name            (UK)            name             (UK con org)    ---------
+   active                          address                          id                 (PK)
+                                   city_id          (FK)            resource_type_id   (FK)
+   account_status_changes          timezone                         location_id        (FK)
+   ----------------------          status                           name               (UK con sede)
+   id              (PK)                                             status
+   subject_type
+   client_id       (FK)                                             schedules
+   organization_id (FK)                                             ---------
+   from_status                                                      id                 (PK)
+   to_status                                                        location_id        (FK)
+   reason                                                           resource_id        (FK)
+   affected_bookings                                                day_of_week
+   changed_by                                                       start_time
+   changed_at                                                       end_time
+                                                                    active
+
+
+   RESERVAS
+   --------
+   bookings                        booking_resources                booking_status_changes
+   --------                        -----------------                ----------------------
+   id              (PK)  <------+  booking_id      (PK,FK) ---+     id              (PK)
+   client_id       (FK)         |  resource_id     (PK,FK)    |     booking_id      (FK)
+   organization_id (FK)         |  location_id     (FK)       |     from_status
+   service_id      (FK)         |  session_id                 |     to_status
+   location_id     (FK)         |  starts_at        ----------+     reason
+   policy_id       (FK)         |  ends_at          (copia)         changed_by
+   session_id                   |  status           (copia)         changed_at
+   starts_at                    |
+   ends_at                      +-------------------------------------------- booking_id
+   attendees
+   total_price
+   status
+   cancelled_at
+```
+
+Las claves foráneas de `bookings` hacia `services`, `locations` y `organization_policies` son
+compuestas: llevan `organization_id`, y por eso una reserva no puede mezclar organizaciones. La de
+`booking_resources` hacia `bookings` incluye `starts_at`, `ends_at` y `status`, que es lo que
+mantiene sincronizada la copia.
 
 ### Identidad y organización
 
@@ -332,8 +416,8 @@ desvíe de su reserva.
 
 ## Preguntas clave del negocio
 
-Once preguntas. Todas se ejecutan sobre las tablas de `schema.sql` y todas devuelven filas con los
-datos de `seed.sql`. El SQL está en [`consultas-clave.sql`](consultas-clave.sql).
+Catorce preguntas. Todas se ejecutan sobre las tablas de `schema.sql` y todas devuelven filas con
+los datos de `seed.sql`. El SQL está en [`consultas-clave.sql`](consultas-clave.sql).
 
 | # | Pregunta | Tipo | HU |
 |---|---|---|---|
@@ -348,6 +432,9 @@ datos de `seed.sql`. El SQL está en [`consultas-clave.sql`](consultas-clave.sql
 | 9 | ¿Qué clientes llevan más de 24 h sin verificar el correo? | filtro temporal | 001 |
 | 10 | ¿Qué condiciones de cancelación rigen para cada reserva? | join, `case` | 002 |
 | 11 | ¿El correo, el documento o el NIT ya están registrados? | `exists` | 001, 002 |
+| 12 | ¿Qué clientes se registraron y nunca han reservado? | subconsulta correlacionada, `not exists` | 001 |
+| 13 | ¿Qué servicios se prestan en una sede y no en otra? | operador de diferencia, `except` | 004 |
+| 14 | ¿Qué sedes ofrecen todos los servicios activos de su organización? | división relacional, doble negación | 004 |
 
 Dos ejemplos con el SQL a la vista. La primera cruza seis tablas y aplica la regla de HU-002 de que
 un proveedor pendiente no aparece en el catálogo:
@@ -490,6 +577,33 @@ select contype, count(*) from pg_constraint
 | Cambiar el estado de una cuenta exige motivo e informe | trigger más `account_status_changes` | 003 |
 | El historial no se borra con la reserva | `on delete restrict` | 003 |
 | Dos franjas de agenda del mismo recurso no se solapan | `ex_schedules_solape` | enunciado |
+
+### Las reglas de integridad en acción
+
+Las restricciones no son declarativas de adorno: las hace cumplir el motor. En
+[`pruebas-integridad.sql`](pruebas-integridad.sql) hay dieciocho instrucciones que violan a propósito
+una regla de negocio cada una, y las dieciocho son rechazadas.
+
+```
+--- 1. Clave candidata: el NIT ya está registrado (HU-002) ---
+ERROR:  duplicate key value violates unique constraint "uk_organizations_nit"
+
+--- 2. Restricción de dominio: anticipación mínima mayor que la máxima (HU-002) ---
+ERROR:  new row for relation "organization_policies" violates check constraint
+        "ck_organization_policies_notice"
+
+--- 9. Un cliente sin verificar confirma una reserva (HU-001) ---
+ERROR:  HU-001: sólo un cliente verificado puede confirmar una reserva (estado PENDING_VERIFICATION)
+
+--- 11. Sobreocupación: otra sesión usando el mismo recurso en franja solapada ---
+ERROR:  conflicting key value violates exclusion constraint "ex_booking_resources_solape"
+
+--- 15. Suspender una organización sin registrar el motivo (HU-003) ---
+ERROR:  HU-003: cambiar el estado a SUSPENDED exige registrar el motivo en account_status_changes
+```
+
+Si alguna de las dieciocho dijera `INSERT` en vez de `ERROR`, habría una regla de negocio que la
+base no está garantizando.
 
 ### La restricción contra la sobreocupación
 

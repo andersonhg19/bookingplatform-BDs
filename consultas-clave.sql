@@ -201,3 +201,51 @@ order by o.name, b.starts_at;
 select exists (select 1 from clients       where lower(email) = lower('laura@example.com')) as correo_ya_registrado,
        exists (select 1 from clients       where document     = '1020334455')               as documento_ya_registrado,
        exists (select 1 from organizations where nit          = '900123456-1')              as nit_ya_registrado;
+
+
+-- 12. ¿Qué clientes se registraron y nunca han reservado? Subconsulta
+--     correlacionada con el operador de existencia.
+\echo '=== 12. Clientes que nunca han reservado ==='
+select c.id, c.full_name, c.email, c.city, c.status
+from   clients c
+where  not exists (select 1
+                   from   bookings b
+                   where  b.client_id = c.id)
+order by c.full_name;
+
+
+-- 13. ¿Qué servicios se prestan en la Sede Poblado pero no en Envigado?
+--     Operador de diferencia del álgebra relacional.
+\echo '=== 13. Servicios de una sede que la otra no ofrece (diferencia) ==='
+select s.name as servicio
+from   service_locations sl
+       inner join services  s on s.id = sl.service_id
+       inner join locations l on l.id = sl.location_id
+where  l.name = 'Sede Poblado'
+except
+select s.name
+from   service_locations sl
+       inner join services  s on s.id = sl.service_id
+       inner join locations l on l.id = sl.location_id
+where  l.name = 'Sede Envigado'
+order by servicio;
+
+
+-- 14. ¿Qué sedes ofrecen TODOS los servicios activos de su organización?
+--     Es el operador de división del álgebra relacional, expresado con
+--     la doble negación: no existe un servicio activo de la organización
+--     que no se preste en esa sede.
+\echo '=== 14. Sedes que ofrecen todos los servicios activos de su organización (división) ==='
+select o.name as organizacion, l.name as sede
+from   locations l
+       inner join organizations o on o.id = l.organization_id
+where  l.status = 'ACTIVE'
+  and  not exists (select 1
+                   from   services s
+                   where  s.organization_id = l.organization_id
+                     and  s.status = 'ACTIVE'
+                     and  not exists (select 1
+                                      from   service_locations sl
+                                      where  sl.service_id  = s.id
+                                        and  sl.location_id = l.id))
+order by o.name, l.name;
