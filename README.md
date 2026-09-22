@@ -291,8 +291,44 @@ erDiagram
     }
 ```
 
-Si algún diagrama no carga, la misma información está exportada como imagen:
-[identidad](docs/er-identidad.png) · [servicios](docs/er-catalogo.png) · [reservas](docs/er-reservas.png).
+<details>
+<summary>Los mismos tres diagramas como imagen, por si Mermaid no carga</summary>
+
+![Identidad y organización](docs/er-identidad.png)
+
+![Servicios y recursos](docs/er-catalogo.png)
+
+![Reservas](docs/er-reservas.png)
+
+</details>
+
+### Las 19 tablas, con sus claves
+
+| Tabla | Clave primaria | Claves foráneas | Para qué |
+|---|---|---|---|
+| `cities` | `id` | — | Catálogo de ciudades, con departamento |
+| `organization_categories` | `id` | — | Catálogo de categorías de negocio |
+| `currencies` | `id` | — | Monedas ISO 4217 |
+| `clients` | `id` | — (`id` = `auth.users.id`) | Perfil del cliente final (HU-001) |
+| `login_attempts` | `id` | — | Intentos de ingreso, para el bloqueo de HU-021 |
+| `organizations` | `id` | `category_id` | El negocio proveedor (HU-002) |
+| `organization_members` | `id` | `organization_id` | Quién trabaja en qué organización y con qué rol |
+| `organization_policies` | `id` | `organization_id` | Reglas de anticipación y cancelación, versionadas |
+| `locations` | `id` | `organization_id`, `city_id` | Sedes |
+| `services` | `id` | `organization_id`, `currency_id` | Servicios ofertados (HU-004) |
+| `service_locations` | `service_id`, `location_id` | `(service_id, organization_id)`, `(location_id, organization_id)` | En qué sedes se presta cada servicio |
+| `resource_types` | `id` | `organization_id` | Tipos de recurso no consumible |
+| `service_resource_requirements` | `id` | `(service_id, organization_id)`, `(resource_type_id, organization_id)` | Cuántos recursos exige un servicio |
+| `resources` | `id` | `resource_type_id`, `location_id` | La instancia concreta que se ocupa |
+| `schedules` | `id` | `location_id`, `(resource_id, location_id)` | Franjas semanales de disponibilidad |
+| `bookings` | `id` | `client_id`, `(service_id, location_id)`, `(service_id, organization_id)`, `(location_id, organization_id)`, `(policy_id, organization_id)` | La reserva |
+| `booking_resources` | `booking_id`, `resource_id` | `(booking_id, starts_at, ends_at, status)`, `(resource_id, location_id)` | Qué recursos ocupa una reserva |
+| `booking_status_changes` | `id` | `booking_id` | Historia de estados de una reserva |
+| `account_status_changes` | `id` | `client_id`, `organization_id` | Motivo e informe al cambiar el estado de una cuenta (HU-003) |
+
+Las claves foráneas entre paréntesis son compuestas. Son las que impiden que una reserva mezcle
+organizaciones, que un recurso se asigne fuera de su sede, y que la copia de `booking_resources` se
+desvíe de su reserva.
 
 ## Preguntas clave del negocio
 
@@ -312,6 +348,39 @@ datos de `seed.sql`. El SQL está en [`consultas-clave.sql`](consultas-clave.sql
 | 9 | ¿Qué clientes llevan más de 24 h sin verificar el correo? | filtro temporal | 001 |
 | 10 | ¿Qué condiciones de cancelación rigen para cada reserva? | join, `case` | 002 |
 | 11 | ¿El correo, el documento o el NIT ya están registrados? | `exists` | 001, 002 |
+
+Dos ejemplos con el SQL a la vista. La primera cruza seis tablas y aplica la regla de HU-002 de que
+un proveedor pendiente no aparece en el catálogo:
+
+```sql
+select o.name as organizacion, s.name as servicio, l.name as sede, s.price, cur.code as moneda
+from services s
+    inner join organizations     o   on o.id   = s.organization_id
+    inner join service_locations sl  on sl.service_id = s.id
+    inner join locations         l   on l.id   = sl.location_id
+    inner join cities            c   on c.id   = l.city_id
+    inner join currencies        cur on cur.id = s.currency_id
+where c.name = 'Medellín'
+  and s.status = 'ACTIVE' and l.status = 'ACTIVE' and o.status = 'ACTIVE'
+order by o.name, s.name;
+```
+
+Y la tercera, que detecta servicios publicados en una sede que no tiene recursos para prestarlos:
+
+```sql
+select s.name as servicio, l.name as sede, rt.name as tipo_de_recurso,
+       srr.quantity_required as requiere, count(r.id) as disponibles
+from services s
+    inner join service_locations             sl  on sl.service_id = s.id
+    inner join locations                     l   on l.id = sl.location_id
+    inner join service_resource_requirements srr on srr.service_id = s.id
+    inner join resource_types                rt  on rt.id = srr.resource_type_id
+    left  join resources                     r   on r.resource_type_id = rt.id
+                                                and r.location_id = l.id
+                                                and r.status = 'ACTIVE'
+group by s.name, l.name, rt.name, srr.quantity_required
+having count(r.id) < srr.quantity_required;
+```
 
 La 10 es la que mejor muestra el modelo. Dos reservas de la misma barbería salen con ventanas de
 cancelación distintas, 1440 y 720 minutos, porque cada una apunta a la versión de política que regía
