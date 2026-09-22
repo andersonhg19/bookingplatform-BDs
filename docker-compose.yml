@@ -1,0 +1,67 @@
+# =====================================================================
+#  Entorno reproducible — Plataforma de Reservas de Servicios
+#  CodeF@ctory 2026-II · Sprint 1 · Bases de Datos
+#
+#  Levanta PostgreSQL 16 con el modelo y los datos de prueba ya
+#  cargados, más pgAdmin para revisarlo desde el navegador sin
+#  instalar nada.
+#
+#      docker compose up -d
+#
+#  PostgreSQL   localhost:5432   usuario: postgres   clave: reservas
+#  pgAdmin      http://localhost:8080
+#               correo: admin@bd.udea.edu.co   clave: reservas
+#
+#  Los scripts de /docker-entrypoint-initdb.d/ se ejecutan en orden
+#  alfabético la PRIMERA vez que se crea el volumen. Por eso van
+#  numerados. Si el contenedor arranca sano, el script corrió sin
+#  errores: la verificación es la propia salud del servicio.
+#
+#  Para empezar de cero:   docker compose down -v && docker compose up -d
+# =====================================================================
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: reservas-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: reservas
+      POSTGRES_DB: reservas
+      # Fuerza el locale para que los acentos ordenen bien
+      LANG: es_CO.UTF-8
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      # No basta con que el proceso viva: se comprueba que las 19 tablas existan
+      test: ["CMD-SHELL", "psql -U postgres -d reservas -tAc \"select case when count(*) = 19 then 1 else 0 end from information_schema.tables where table_schema='public'\" | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: reservas-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@bd.udea.edu.co
+      PGADMIN_DEFAULT_PASSWORD: reservas
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "8080:80"
+    volumes:
+      - ./docs/pgadmin-servers.json:/pgadmin4/servers.json:ro
+      - pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  pgadmin-data:
