@@ -1,16 +1,20 @@
 -- =====================================================================
 --  Plataforma de Reservas de Servicios — modelo físico
---  Sprint 1
+--  Sprint 2
 --
---  PostgreSQL 15+ (probado en 16). Compatible con Supabase.
---  Contra una base vacía crea las 19 tablas sin errores.
+--  PostgreSQL 16 y Supabase. Contra una base vacía crea las 29 tablas,
+--  sus restricciones, índices, triggers, roles y políticas.
 --
---  También corre contra una base que ya tenga `clients` y
---  `login_attempts` del mapeo JPA: esas dos se saltan, y sus
---  restricciones se añaden con bloques DO porque
---  `create table if not exists` no las agrega si la tabla ya existe.
+--  De dónde sale cada parte:
+--    · Las 19 tablas del Sprint 1 y los cambios que el equipo hizo en
+--      el Sprint 2 con Flyway (V3 a V9 del backend). Aquí están en su
+--      estado final, ya aplicados, no como una cadena de ALTER.
+--    · Seis tablas nuevas, marcadas con [S2 nueva]: excepciones de
+--      agenda, reseñas, lista de espera, pagos, ocupación diaria y
+--      auditoría.
+--    · Roles, permisos y RLS al final del archivo.
 --
---  Lo que este esquema NO garantiza está al final del archivo.
+--  Lo que este esquema NO garantiza está al final.
 -- =====================================================================
 
 -- En Supabase las extensiones van en el esquema `extensions`;
@@ -31,11 +35,10 @@ end $$;
 
 
 -- =====================================================================
---  Catálogos
---  Separados para eliminar dependencias transitivas (3FN).
+--  1. Catálogos
 -- =====================================================================
 
-create table if not exists cities (
+create table cities (
     id     uuid         primary key default gen_random_uuid(),
     name   varchar(120) not null,
     region varchar(120) not null,   -- departamento: hay municipios homónimos
@@ -43,14 +46,14 @@ create table if not exists cities (
     constraint ck_cities_name        check (length(btrim(name)) > 0)
 );
 
-create table if not exists organization_categories (
+create table organization_categories (
     id   uuid        primary key default gen_random_uuid(),
     name varchar(80) not null,
     constraint uk_organization_categories_name unique (name),
     constraint ck_organization_categories_name check (length(btrim(name)) > 0)
 );
 
-create table if not exists currencies (
+create table currencies (
     id     uuid        primary key default gen_random_uuid(),
     code   char(3)     not null,
     name   varchar(60) not null,
@@ -62,20 +65,14 @@ create table if not exists currencies (
 
 
 -- =====================================================================
---  Identidad
---  Las credenciales viven en auth.users de Supabase, que este script no
---  crea. Por eso clients.id, organization_members.user_id y
---  account_status_changes.changed_by no tienen clave foránea declarada.
---
---  El perfil del personal de una organización tampoco vive aquí: de un
---  miembro sólo guardamos la membresía y el rol, y sus datos personales
---  quedan en auth.users. Duplicarlos en una tabla propia repetiría lo
---  que clients ya modela para el cliente final.
+--  2. Identidad
+--  Las credenciales viven en auth.users de Supabase. Por eso clients.id,
+--  organization_members.user_id y los changed_by no tienen FK declarada.
 -- =====================================================================
 
--- clients: ya implementada por el equipo (ClientEntity).
--- No se altera ninguna columna ni ningún tipo.
-create table if not exists clients (
+-- Implementada por el equipo (ClientEntity). Tipos idénticos al mapeo
+-- JPA, incluido timestamp(6) sin zona: el perfil de nube valida el esquema.
+create table clients (
     id                   uuid         not null,
     full_name            varchar(120) not null,
     document             varchar(30)  not null,
@@ -87,55 +84,19 @@ create table if not exists clients (
     status               varchar(30)  not null,
     created_at           timestamp(6) not null,
     updated_at           timestamp(6) not null,
-    constraint pk_clients primary key (id)
+    constraint pk_clients primary key (id),
+    constraint uk_clients_email    unique (email),
+    constraint uk_clients_document unique (document),
+    constraint ck_clients_status   check (status in ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED')),
+    constraint ck_clients_notification_channel check (notification_channel in ('EMAIL', 'SMS', 'WHATSAPP')),
+    -- HU-001: no se permite autorregistro de menores de 18 años
+    constraint ck_clients_adult          check (birth_date <= current_date - interval '18 years'),
+    constraint ck_clients_email_formato  check (email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$'),
+    constraint ck_clients_phone_formato  check (phone ~ '^\+?[0-9]{7,15}$')
 );
 
--- Las restricciones van aparte: si la tabla ya existía, el
--- `create table if not exists` de arriba no habría añadido ninguna.
-do $$
-begin
-    alter table clients add constraint uk_clients_email  unique (email);
-exception when duplicate_table or duplicate_object then null; end $$;
-do $$
-begin
-    alter table clients add constraint uk_clients_document unique (document);
-exception when duplicate_table or duplicate_object then null; end $$;
-do $$
-begin
-    alter table clients add constraint ck_clients_status
-        check (status in ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED'));
-exception when duplicate_object then null; end $$;
-do $$
-begin
-    alter table clients add constraint ck_clients_notification_channel
-        check (notification_channel in ('EMAIL', 'SMS', 'WHATSAPP'));
-exception when duplicate_object then null; end $$;
-do $$
-begin
-    -- HU-001: no se permite autorregistro de menores de 18 años
-    alter table clients add constraint ck_clients_adult
-        check (birth_date <= current_date - interval '18 years');
-exception when duplicate_object then null; end $$;
-do $$
-begin
-    -- HU-001: "rechazo por formato inválido de correo o teléfono"
-    alter table clients add constraint ck_clients_email_formato
-        check (email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$');
-exception when duplicate_object then null; end $$;
-do $$
-begin
-    alter table clients add constraint ck_clients_phone_formato
-        check (phone ~ '^\+?[0-9]{7,15}$');
-exception when duplicate_object then null; end $$;
-
--- El unique del equipo distingue mayúsculas, así que Ana@x.com y
--- ana@x.com entran como dos cuentas. Este índice lo cierra sin
--- quitarles nada.
-create unique index if not exists ux_clients_email_lower on clients (lower(email));
-
--- login_attempts: ya implementada por el equipo. Soporta el bloqueo por
--- cuenta de HU-021, que GoTrue no cubre porque sólo limita por IP.
-create table if not exists login_attempts (
+-- Implementada por el equipo. Soporta el bloqueo por cuenta de HU-021.
+create table login_attempts (
     id           bigint       generated by default as identity,
     email        varchar(160) not null,
     success      boolean      not null,
@@ -145,55 +106,55 @@ create table if not exists login_attempts (
 
 
 -- =====================================================================
---  Organización (HU-002, HU-003)
+--  3. Organización (HU-002, HU-003)
 -- =====================================================================
 
-create table if not exists organizations (
-    id            uuid         primary key default gen_random_uuid(),
-    category_id   uuid         not null,
-    name          varchar(160) not null,
-    nit           varchar(20)  not null,
-    contact_email varchar(160) not null,
-    contact_phone varchar(20)  not null,
-    timezone      varchar(60)  not null default 'America/Bogota',
-    status        varchar(30)  not null default 'PENDING_APPROVAL',
-    approved_at   timestamptz,
-    created_at    timestamptz  not null default now(),
-    updated_at    timestamptz  not null default now(),
+create table organizations (
+    id                    uuid         primary key default gen_random_uuid(),
+    category_id           uuid         not null,
+    name                  varchar(160) not null,
+    -- S2 (V4 del equipo): antes era `nit`. Una persona natural también
+    -- presta servicios y se identifica con cédula o pasaporte.
+    identification_type   varchar(20)  not null default 'NIT',
+    identification_number varchar(20)  not null,
+    contact_email         varchar(160) not null,
+    contact_phone         varchar(20)  not null,
+    timezone              varchar(60)  not null default 'America/Bogota',
+    status                varchar(30)  not null default 'PENDING_APPROVAL',
+    approved_at           timestamptz,
+    created_at            timestamptz  not null default now(),
+    updated_at            timestamptz  not null default now(),
 
-    constraint uk_organizations_nit unique (nit),                 -- HU-002: NIT único
-
+    constraint uk_organizations_identification unique (identification_type, identification_number),
     constraint fk_organizations_category foreign key (category_id) references organization_categories (id) on delete restrict,
 
+    constraint ck_organizations_identification_type   check (identification_type in ('NIT', 'CC', 'CE', 'PASAPORTE')),
+    constraint ck_organizations_identification_number check (length(btrim(identification_number)) > 0),
     constraint ck_organizations_status check (status in ('PENDING_APPROVAL', 'ACTIVE', 'SUSPENDED', 'REJECTED')),
     constraint ck_organizations_name   check (length(btrim(name)) > 0),
-    constraint ck_organizations_nit    check (length(btrim(nit))  > 0),
     constraint ck_organizations_email  check (contact_email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$'),
-    -- Sólo ACTIVE y SUSPENDED pueden tener fecha de aprobación, y ACTIVE
-    -- la exige: no hay organización activa sin registro de quién la aprobó
+    -- No hay organización activa sin fecha de aprobación
     constraint ck_organizations_approved check (
-        (status = 'ACTIVE'                        and approved_at is not null) or
+        (status = 'ACTIVE'                         and approved_at is not null) or
         (status in ('PENDING_APPROVAL','REJECTED') and approved_at is null)    or
         (status = 'SUSPENDED'))
 );
 
-create table if not exists organization_members (
+-- Rol dentro del proveedor (ADR-0008): OWNER = proveedor,
+-- MANAGER = gerente, STAFF = recepcionista.
+create table organization_members (
     id              uuid        primary key default gen_random_uuid(),
     organization_id uuid        not null,
     user_id         uuid        not null,
     role            varchar(30) not null,
     created_at      timestamptz not null default now(),
-    -- La PK sustituta se conserva porque así la diseñó el equipo; la clave
-    -- natural queda como UNIQUE, que preserva igual la dependencia funcional.
     constraint uk_organization_members      unique (organization_id, user_id),
     constraint fk_organization_members_org  foreign key (organization_id) references organizations (id) on delete cascade,
     constraint ck_organization_members_role check (role in ('OWNER', 'MANAGER', 'STAFF'))
 );
 
--- Política versionada. HU-002 pide que los cambios apliquen sólo a las
--- reservas nuevas, así que en vez de copiar los parámetros en cada
--- reserva, cada reserva apunta a la versión que regía al crearse.
-create table if not exists organization_policies (
+-- Política versionada: cada reserva apunta a la versión que regía al crearse.
+create table organization_policies (
     id                               uuid        primary key default gen_random_uuid(),
     organization_id                  uuid        not null,
     version                          integer     not null,
@@ -204,38 +165,35 @@ create table if not exists organization_policies (
     replaced_at                      timestamptz,
 
     constraint uk_organization_policies_version unique (organization_id, version),
-    constraint uk_organization_policies_id_org  unique (id, organization_id),   -- clave alterna para CF compuesta
+    constraint uk_organization_policies_id_org  unique (id, organization_id),   -- clave alterna para FK compuesta
     constraint fk_organization_policies_org     foreign key (organization_id) references organizations (id) on delete restrict,
 
-    constraint ck_organization_policies_version check (version > 0),
-    constraint ck_organization_policies_notice  check (booking_notice_minutes_min >= 0
-                                                   and booking_notice_minutes_max >= 0
-                                                   and booking_notice_minutes_min <= booking_notice_minutes_max),
-    constraint ck_organization_policies_cancel  check (free_cancellation_window_minutes >= 0),
+    constraint ck_organization_policies_version  check (version > 0),
+    constraint ck_organization_policies_notice   check (booking_notice_minutes_min >= 0
+                                                    and booking_notice_minutes_max >= 0
+                                                    and booking_notice_minutes_min <= booking_notice_minutes_max),
+    constraint ck_organization_policies_cancel   check (free_cancellation_window_minutes >= 0),
     constraint ck_organization_policies_vigencia check (replaced_at is null or replaced_at > effective_from),
-    -- Dos versiones no pueden regir a la vez, ni siquiera históricamente
+    -- Dos versiones no pueden regir a la vez
     constraint ex_organization_policies_solape exclude using gist (
         organization_id with =,
         tstzrange(effective_from, replaced_at) with &&
     )
 );
 
-create table if not exists locations (
+create table locations (
     id              uuid         primary key default gen_random_uuid(),
     organization_id uuid         not null,
     name            varchar(120) not null,
     address         varchar(200) not null,
     city_id         uuid         not null,
-    -- Nulo = hereda la zona horaria de la organización. Al ser un
-    -- override explícito, NO existe la dependencia city_id -> timezone
-    -- que sacaría a esta tabla de 3FN.
-    timezone        varchar(60),
+    timezone        varchar(60),              -- nulo = la de la organización
     status          varchar(20)  not null default 'ACTIVE',
     created_at      timestamptz  not null default now(),
     updated_at      timestamptz  not null default now(),
 
     constraint uk_locations_org_name unique (organization_id, name),
-    constraint uk_locations_id_org   unique (id, organization_id),   -- clave alterna para CF compuesta
+    constraint uk_locations_id_org   unique (id, organization_id),
     constraint fk_locations_org      foreign key (organization_id) references organizations (id) on delete restrict,
     constraint fk_locations_city     foreign key (city_id) references cities (id) on delete restrict,
     constraint ck_locations_status   check (status in ('ACTIVE', 'INACTIVE')),
@@ -244,10 +202,10 @@ create table if not exists locations (
 
 
 -- =====================================================================
---  Servicios (HU-004)
+--  4. Servicios y recursos (HU-004, HU-009)
 -- =====================================================================
 
-create table if not exists services (
+create table services (
     id                  uuid          primary key default gen_random_uuid(),
     organization_id     uuid          not null,
     name                varchar(120)  not null,
@@ -258,12 +216,13 @@ create table if not exists services (
     price               numeric(12,2) not null,
     currency_id         uuid          not null,
     customer_capacity   integer       not null default 1,
-    status              varchar(20)   not null default 'ACTIVE',
+    -- S2 (V3 del equipo): nace inactivo; HU-009 no deja activarlo sin recursos
+    status              varchar(20)   not null default 'INACTIVE',
     created_at          timestamptz   not null default now(),
     updated_at          timestamptz   not null default now(),
 
-    constraint uk_services_org_name unique (organization_id, name),  -- HU-004: nombre único por proveedor
-    constraint uk_services_id_org   unique (id, organization_id),    -- clave alterna para CF compuesta
+    constraint uk_services_org_name unique (organization_id, name),
+    constraint uk_services_id_org   unique (id, organization_id),
     constraint fk_services_org      foreign key (organization_id) references organizations (id) on delete restrict,
     constraint fk_services_currency foreign key (currency_id) references currencies (id) on delete restrict,
 
@@ -275,10 +234,9 @@ create table if not exists services (
     constraint ck_services_name     check (length(btrim(name)) > 0)
 );
 
--- Sedes donde se presta cada servicio (HU-004). organization_id se
--- arrastra para que las CF compuestas impidan publicar un servicio de
--- una organización en la sede de otra.
-create table if not exists service_locations (
+-- Sedes donde se presta cada servicio. organization_id va en la fila para
+-- que las FK compuestas impidan mezclar organizaciones.
+create table service_locations (
     service_id      uuid not null,
     location_id     uuid not null,
     organization_id uuid not null,
@@ -287,7 +245,7 @@ create table if not exists service_locations (
     constraint fk_service_locations_loc foreign key (location_id, organization_id) references locations (id, organization_id) on delete cascade
 );
 
-create table if not exists resource_types (
+create table resource_types (
     id              uuid         primary key default gen_random_uuid(),
     organization_id uuid         not null,
     name            varchar(80)  not null,
@@ -298,7 +256,7 @@ create table if not exists resource_types (
     constraint fk_resource_types_org      foreign key (organization_id) references organizations (id) on delete restrict
 );
 
-create table if not exists service_resource_requirements (
+create table service_resource_requirements (
     id                uuid    primary key default gen_random_uuid(),
     service_id        uuid    not null,
     resource_type_id  uuid    not null,
@@ -310,77 +268,146 @@ create table if not exists service_resource_requirements (
     constraint ck_service_resource_req_qty  check (quantity_required > 0)
 );
 
-
--- =====================================================================
---  Recursos y agenda
---  El diagrama del equipo llegaba hasta el tipo de recurso. Sin la
---  instancia concreta no hay control de disponibilidad.
--- =====================================================================
-
-create table if not exists resources (
+create table resources (
     id               uuid         primary key default gen_random_uuid(),
+    -- S2 (V7 del equipo): con la organización en la fila, las FK
+    -- compuestas exigen que el tipo y la sede sean del mismo proveedor
+    organization_id  uuid         not null,
     resource_type_id uuid         not null,
     location_id      uuid         not null,
     name             varchar(120) not null,
+    capacity         integer      not null default 1,   -- S2 (V7): personas a la vez
     status           varchar(20)  not null default 'ACTIVE',
     created_at       timestamptz  not null default now(),
     updated_at       timestamptz  not null default now(),
     constraint uk_resources_location_name unique (location_id, name),
-    constraint uk_resources_id_location   unique (id, location_id),   -- clave alterna para CF compuesta
+    constraint uk_resources_id_location   unique (id, location_id),
     constraint fk_resources_type          foreign key (resource_type_id) references resource_types (id) on delete restrict,
     constraint fk_resources_location      foreign key (location_id)      references locations (id)      on delete restrict,
-    constraint ck_resources_status        check (status in ('ACTIVE', 'INACTIVE'))
+    constraint fk_resources_type_org      foreign key (resource_type_id, organization_id) references resource_types (id, organization_id) on delete restrict,
+    constraint fk_resources_location_org  foreign key (location_id, organization_id)      references locations (id, organization_id)      on delete restrict,
+    constraint ck_resources_capacity      check (capacity >= 1),
+    -- S2 (V7): "en mantenimiento" no es un estado sino un periodo
+    constraint ck_resources_status        check (status in ('ACTIVE', 'RETIRED'))
 );
 
--- Franja semanal recurrente. resource_id nulo = toda la sede.
-create table if not exists schedules (
-    id          uuid     primary key default gen_random_uuid(),
-    location_id uuid     not null,
-    resource_id uuid,
-    day_of_week smallint not null,
-    start_time  time     not null,
-    end_time    time     not null,
-    active      boolean  not null default true,
-    created_at  timestamptz not null default now(),
+-- S2 (V7 del equipo)
+create table resource_maintenances (
+    id          uuid         primary key default gen_random_uuid(),
+    resource_id uuid         not null,
+    starts_at   timestamptz  not null,
+    ends_at     timestamptz  not null,
+    reason      varchar(300),
+    created_at  timestamptz  not null default now(),
+    constraint fk_resource_maintenances_resource foreign key (resource_id) references resources (id) on delete cascade,
+    constraint ck_resource_maintenances_rango check (ends_at > starts_at),
+    constraint ex_resource_maintenances_solape exclude using gist (
+        resource_id with =,
+        tstzrange(starts_at, ends_at) with &&
+    )
+);
 
-    -- Sin esta clave la misma franja entra N veces e infla el
-    -- denominador de los reportes de ocupación. El nulls not distinct
-    -- hace falta para las franjas de sede completa.
-    constraint uk_schedules_franja unique nulls not distinct
-        (location_id, resource_id, day_of_week, start_time, end_time),
 
-    constraint fk_schedules_location foreign key (location_id) references locations (id) on delete cascade,
-    -- El recurso tiene que estar en esa sede. Con match simple, si
-    -- resource_id es nulo la CF no se verifica.
-    constraint fk_schedules_resource foreign key (resource_id, location_id) references resources (id, location_id) on delete cascade,
+-- =====================================================================
+--  5. Agendas (HU-006)
+--  S2 (V8 del equipo): schedules dejó de ser una franja suelta por sede
+--  y pasó a ser un bloque de una agenda.
+-- =====================================================================
 
-    constraint ck_schedules_dow   check (day_of_week between 1 and 7),   -- ISO: 1 = lunes
-    constraint ck_schedules_rango check (end_time > start_time),
+create table agendas (
+    id              uuid         primary key default gen_random_uuid(),
+    organization_id uuid         not null,
+    location_id     uuid         not null,
+    resource_id     uuid,                       -- nulo = toda la sede
+    name            varchar(120) not null,
+    slot_minutes    smallint     not null,
+    valid_from      date         not null,
+    valid_until     date,                       -- nulo = sin fecha de fin
+    created_at      timestamptz  not null default now(),
+    updated_at      timestamptz  not null default now(),
 
-    -- Dos franjas activas del mismo recurso no se pueden solapar
-    constraint ex_schedules_solape exclude using gist (
+    constraint uk_agendas_org_name     unique (organization_id, name),
+    constraint uk_agendas_id_location  unique (id, location_id),
+    constraint fk_agendas_location_org foreign key (location_id, organization_id) references locations (id, organization_id) on delete restrict,
+    constraint fk_agendas_resource     foreign key (resource_id, location_id)     references resources (id, location_id)     on delete restrict,
+    constraint ck_agendas_slot         check (slot_minutes in (15, 30, 60)),
+    constraint ck_agendas_vigencia     check (valid_until is null or valid_until >= valid_from),
+    constraint ck_agendas_name         check (length(btrim(name)) > 0),
+    -- Una sede, o un recurso, no tiene dos agendas vigentes a la vez
+    constraint ex_agendas_solape exclude using gist (
         location_id with =,
         coalesce(resource_id, '00000000-0000-0000-0000-000000000000'::uuid) with =,
+        daterange(valid_from, valid_until, '[]') with &&
+    )
+);
+
+-- Servicios reservables en cada agenda; deben prestarse en su sede
+create table agenda_services (
+    agenda_id   uuid not null,
+    service_id  uuid not null,
+    location_id uuid not null,
+    constraint pk_agenda_services         primary key (agenda_id, service_id),
+    constraint fk_agenda_services_agenda  foreign key (agenda_id, location_id)  references agendas (id, location_id) on delete cascade,
+    constraint fk_agenda_services_service foreign key (service_id, location_id) references service_locations (service_id, location_id) on delete cascade
+);
+
+-- Bloques semanales de una agenda
+create table schedules (
+    id          uuid        primary key default gen_random_uuid(),
+    agenda_id   uuid        not null,
+    day_of_week smallint    not null,           -- ISO: 1 = lunes
+    start_time  time        not null,
+    end_time    time        not null,
+    active      boolean     not null default true,
+    created_at  timestamptz not null default now(),
+    constraint fk_schedules_agenda foreign key (agenda_id) references agendas (id) on delete cascade,
+    constraint ck_schedules_dow    check (day_of_week between 1 and 7),
+    constraint ck_schedules_rango  check (end_time > start_time),
+    constraint ex_schedules_solape exclude using gist (
+        agenda_id with =,
         day_of_week with =,
         timerange(start_time, end_time) with &&
     ) where (active)
 );
 
+-- [S2 nueva] Días en que la agenda no atiende, o atiende menos: festivos,
+-- cierres, una jornada recortada. schedules sólo sabe de días de la
+-- semana; sin esta tabla no hay forma de decir "el 25 de diciembre no".
+create table agenda_exceptions (
+    id             uuid         not null default gen_random_uuid(),
+    agenda_id      uuid         not null,
+    exception_date date         not null,
+    start_time     time,                        -- los dos nulos = cerrado todo el día
+    end_time       time,
+    reason         varchar(300) not null,
+    created_at     timestamptz  not null default now(),
+    constraint pk_agenda_exceptions        primary key (id),
+    constraint fk_agenda_exceptions_agenda foreign key (agenda_id) references agendas (id) on delete cascade,
+    constraint ck_agenda_exceptions_franja check (
+        (start_time is null and end_time is null) or
+        (start_time is not null and end_time is not null and end_time > start_time)),
+    constraint ck_agenda_exceptions_reason check (length(btrim(reason)) > 0),
+    -- Dos excepciones del mismo día no se pisan
+    constraint ex_agenda_exceptions_solape exclude using gist (
+        agenda_id with =,
+        exception_date with =,
+        timerange(coalesce(start_time, time '00:00'), coalesce(end_time, time '24:00')) with &&
+    )
+);
+
 
 -- =====================================================================
---  Reservas
+--  6. Reservas
 -- =====================================================================
 
-create table if not exists bookings (
+create table bookings (
     id              uuid          primary key default gen_random_uuid(),
     client_id       uuid          not null,
     organization_id uuid          not null,
     service_id      uuid          not null,
     location_id     uuid          not null,
     policy_id       uuid          not null,
-    -- Sesión a la que pertenece la reserva. En un servicio individual
-    -- cada reserva es su propia sesión; en uno grupal, varias reservas
-    -- comparten sesión y por tanto comparten recurso (ver booking_resources).
+    -- Individual: una sesión por reserva. Grupal: varias reservas la comparten.
     session_id      uuid          not null,
     starts_at       timestamptz   not null,
     ends_at         timestamptz   not null,
@@ -391,19 +418,14 @@ create table if not exists bookings (
     created_at      timestamptz   not null default now(),
     updated_at      timestamptz   not null default now(),
 
-    -- Destino de la CF compuesta de booking_resources: es lo que hace
-    -- que el motor mantenga sincronizada la copia del rango.
+    -- Destino de la FK compuesta de booking_resources
     constraint uk_bookings_snapshot unique (id, starts_at, ends_at, status),
 
     constraint fk_bookings_client foreign key (client_id) references clients (id) on delete restrict,
-
-    -- El servicio tiene que prestarse en esa sede (HU-004)
-    constraint fk_bookings_service_location
-        foreign key (service_id, location_id) references service_locations (service_id, location_id) on delete restrict,
-    -- y servicio, sede y política tienen que ser de la misma organización
-    constraint fk_bookings_service_org  foreign key (service_id,  organization_id) references services              (id, organization_id) on delete restrict,
-    constraint fk_bookings_location_org foreign key (location_id, organization_id) references locations             (id, organization_id) on delete restrict,
-    constraint fk_bookings_policy_org   foreign key (policy_id,   organization_id) references organization_policies (id, organization_id) on delete restrict,
+    constraint fk_bookings_service_location foreign key (service_id, location_id)   references service_locations     (service_id, location_id) on delete restrict,
+    constraint fk_bookings_service_org      foreign key (service_id, organization_id) references services            (id, organization_id)     on delete restrict,
+    constraint fk_bookings_location_org     foreign key (location_id, organization_id) references locations          (id, organization_id)     on delete restrict,
+    constraint fk_bookings_policy_org       foreign key (policy_id, organization_id)  references organization_policies (id, organization_id)   on delete restrict,
 
     constraint ck_bookings_rango     check (ends_at > starts_at),
     constraint ck_bookings_attendees check (attendees > 0),
@@ -412,16 +434,10 @@ create table if not exists bookings (
     constraint ck_bookings_cancel    check (status <> 'CANCELLED' or cancelled_at is not null)
 );
 
--- Recursos ocupados por una reserva.
---
--- starts_at, ends_at y status se repiten desde bookings a propósito.
--- PostgreSQL no evalúa un EXCLUDE a través de un join, así que para
--- impedir el doble uso de un recurso el rango tiene que estar en la
--- misma tabla que resource_id. Es una violación de 2FN asumida.
---
--- La copia no puede desviarse: la CF compuesta contra la clave alterna
--- de bookings la mantiene el motor, con on update cascade.
-create table if not exists booking_resources (
+-- Recursos que ocupa una reserva. El rango y el estado se copian de
+-- bookings porque un EXCLUDE no mira a través de un join; la FK compuesta
+-- con on update cascade mantiene la copia sincronizada.
+create table booking_resources (
     booking_id  uuid        not null,
     resource_id uuid        not null,
     location_id uuid        not null,
@@ -431,24 +447,15 @@ create table if not exists booking_resources (
     status      varchar(20) not null,
 
     constraint pk_booking_resources primary key (booking_id, resource_id),
-
-    -- La copia la garantiza el motor, no la aplicación.
     constraint fk_booking_resources_bkg
         foreign key (booking_id, starts_at, ends_at, status)
         references bookings (id, starts_at, ends_at, status)
         on update cascade on delete cascade,
-
-    -- El recurso tiene que estar en la sede de la reserva
     constraint fk_booking_resources_res
         foreign key (resource_id, location_id) references resources (id, location_id) on delete restrict,
-
     constraint ck_booking_resources_rango  check (ends_at > starts_at),
     constraint ck_booking_resources_status check (status in ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW')),
-
-    -- Un recurso no puede estar en dos sesiones distintas que se
-    -- solapen. El session_id with <> es lo que permite los servicios
-    -- grupales: varias reservas de la misma sesión comparten el recurso
-    -- sin chocar. Las canceladas no bloquean.
+    -- Un recurso no atiende dos sesiones que se solapan. Las canceladas no bloquean.
     constraint ex_booking_resources_solape exclude using gist (
         resource_id with =,
         session_id  with <>,
@@ -456,9 +463,7 @@ create table if not exists booking_resources (
     ) where (status in ('RESERVED', 'CONFIRMED'))
 );
 
--- Traza de cambios de estado de una reserva. Con on delete restrict,
--- porque un historial que desaparece con lo que traza no sirve.
-create table if not exists booking_status_changes (
+create table booking_status_changes (
     id          uuid         primary key default gen_random_uuid(),
     booking_id  uuid         not null,
     from_status varchar(20),
@@ -469,21 +474,17 @@ create table if not exists booking_status_changes (
     constraint fk_booking_status_changes foreign key (booking_id) references bookings (id) on delete restrict,
     constraint ck_bsc_from   check (from_status is null or from_status in ('RESERVED','CONFIRMED','CANCELLED','COMPLETED','NO_SHOW')),
     constraint ck_bsc_to     check (to_status in ('RESERVED','CONFIRMED','CANCELLED','COMPLETED','NO_SHOW')),
-    -- Cancelar exige motivo, y un motivo en blanco no es un motivo
     constraint ck_bsc_reason check (to_status <> 'CANCELLED' or length(btrim(coalesce(reason,''))) > 0)
 );
 
--- HU-003 exige motivo al aprobar, suspender o reactivar, e informe de
--- reservas afectadas al suspender. Eso es sobre cuentas, no sobre
--- reservas, así que necesita su propia tabla.
-create table if not exists account_status_changes (
+create table account_status_changes (
     id                uuid         primary key default gen_random_uuid(),
     subject_type      varchar(20)  not null,
     client_id         uuid,
     organization_id   uuid,
     from_status       varchar(30),
     to_status         varchar(30)  not null,
-    reason            varchar(500) not null,      -- SIEMPRE obligatorio
+    reason            varchar(500) not null,
     affected_bookings integer      not null default 0,
     changed_by        uuid,
     changed_at        timestamptz  not null default now(),
@@ -496,11 +497,144 @@ create table if not exists account_status_changes (
     constraint ck_account_status_changes_count  check (affected_bookings >= 0)
 );
 
+-- [S2 nueva] Calificación del cliente a una reserva ya atendida.
+-- El cliente y el servicio no se copian: salen de la reserva (3FN).
+create table booking_reviews (
+    id         uuid          not null default gen_random_uuid(),
+    booking_id uuid          not null,
+    rating     smallint      not null,
+    comment    varchar(1000),
+    created_at timestamptz   not null default now(),
+    updated_at timestamptz   not null default now(),
+    constraint pk_booking_reviews         primary key (id),
+    constraint uk_booking_reviews_booking unique (booking_id),   -- una reseña por reserva
+    constraint fk_booking_reviews_booking foreign key (booking_id) references bookings (id) on delete restrict,
+    constraint ck_booking_reviews_rating  check (rating between 1 and 5),
+    constraint ck_booking_reviews_comment check (comment is null or length(btrim(comment)) > 0)
+);
+
+-- [S2 nueva] Cuando no hay cupo, el cliente se anota para un día. Si se
+-- libera un espacio, se le avisa en orden de llegada (created_at).
+create table waitlist_entries (
+    id           uuid        not null default gen_random_uuid(),
+    client_id    uuid        not null,
+    service_id   uuid        not null,
+    location_id  uuid        not null,
+    desired_date date        not null,
+    attendees    integer     not null default 1,
+    status       varchar(20) not null default 'WAITING',
+    booking_id   uuid,                          -- la reserva en que terminó
+    notified_at  timestamptz,                   -- cuándo se le avisó del cupo
+    created_at   timestamptz not null default now(),
+    updated_at   timestamptz not null default now(),
+    constraint pk_waitlist_entries                  primary key (id),
+    constraint fk_waitlist_entries_client           foreign key (client_id) references clients (id) on delete cascade,
+    constraint fk_waitlist_entries_service_location foreign key (service_id, location_id) references service_locations (service_id, location_id) on delete cascade,
+    constraint fk_waitlist_entries_booking          foreign key (booking_id) references bookings (id) on delete restrict,
+    constraint ck_waitlist_entries_attendees check (attendees > 0),
+    constraint ck_waitlist_entries_status    check (status in ('WAITING', 'NOTIFIED', 'BOOKED', 'EXPIRED', 'CANCELLED')),
+    -- Sólo la que se convirtió en reserva apunta a una
+    constraint ck_waitlist_entries_booked    check ((status = 'BOOKED') = (booking_id is not null)),
+    -- Quien ya fue avisado tiene fecha de aviso, para saber cuándo vence
+    constraint ck_waitlist_entries_notified  check (status not in ('NOTIFIED', 'BOOKED', 'EXPIRED') or notified_at is not null)
+);
+
+-- [S2 nueva] Pagos de una reserva. Puede haber varios intentos (uno
+-- falla, el siguiente pasa), pero sólo uno vivo a la vez: ver
+-- ux_payments_vigente. amount y currency_id son lo que de verdad cobró
+-- la pasarela, que no siempre coincide con el precio pactado: una
+-- tarjeta internacional se cobra en otra moneda. Por eso no se derivan
+-- de la reserva.
+create table payments (
+    id                 uuid          not null default gen_random_uuid(),
+    booking_id         uuid          not null,
+    amount             numeric(12,2) not null,
+    currency_id        uuid          not null,
+    method             varchar(20)   not null,
+    status             varchar(20)   not null default 'PENDING',
+    external_reference varchar(100),              -- referencia de la pasarela
+    paid_at            timestamptz,
+    refunded_at        timestamptz,
+    created_at         timestamptz   not null default now(),
+    updated_at         timestamptz   not null default now(),
+    constraint pk_payments                    primary key (id),
+    constraint uk_payments_external_reference unique (external_reference),
+    constraint fk_payments_booking  foreign key (booking_id)  references bookings (id)   on delete restrict,
+    constraint fk_payments_currency foreign key (currency_id) references currencies (id) on delete restrict,
+    constraint ck_payments_amount check (amount > 0),
+    constraint ck_payments_external_reference check (external_reference is null or length(btrim(external_reference)) > 0),
+    constraint ck_payments_method check (method in ('CARD', 'BANK_TRANSFER', 'CASH')),
+    constraint ck_payments_status check (status in ('PENDING', 'PAID', 'FAILED', 'REFUNDED')),
+    -- Cada estado con sus fechas: no hay pago sin fecha ni reembolso de algo no pagado
+    constraint ck_payments_fechas check (
+        (status in ('PENDING', 'FAILED') and paid_at is null     and refunded_at is null) or
+        (status = 'PAID'                 and paid_at is not null and refunded_at is null) or
+        (status = 'REFUNDED'             and paid_at is not null and refunded_at is not null
+                                         and refunded_at >= paid_at))
+);
+
 
 -- =====================================================================
---  Reglas que no se pueden expresar con una restricción declarativa
---  Comparan entre tablas, y PostgreSQL no admite subconsultas en un
---  check. Van en triggers para que la garantía siga viviendo en la base.
+--  7. Notificaciones
+-- =====================================================================
+
+-- S2 (V6 del equipo): Render bloquea SMTP, así que el correo se guarda aquí
+create table sent_emails (
+    id         uuid         primary key default gen_random_uuid(),
+    recipient  varchar(160) not null,
+    subject    varchar(200) not null,
+    body       text         not null,
+    sent_at    timestamptz  not null default now(),
+    constraint ck_sent_emails_recipient check (length(btrim(recipient)) > 0),
+    constraint ck_sent_emails_subject   check (length(btrim(subject)) > 0)
+);
+
+
+-- =====================================================================
+--  8. Reportes y auditoría
+-- =====================================================================
+
+-- [S2 nueva] Resumen diario de ocupación por recurso, para los "reportes
+-- sobre ocupación y uso" del caso. Es un dato derivado a propósito: lo
+-- llena fn_calcular_ocupacion una vez al día, y así el reporte de un mes
+-- lee 30 filas por recurso en vez de recorrer todas las reservas.
+create table resource_occupancy_daily (
+    resource_id       uuid        not null,
+    occupancy_date    date        not null,
+    available_minutes integer     not null,
+    booked_minutes    integer     not null,
+    bookings_count    integer     not null,
+    calculated_at     timestamptz not null default now(),
+    constraint pk_resource_occupancy_daily primary key (resource_id, occupancy_date),
+    constraint fk_resource_occupancy_daily_resource foreign key (resource_id) references resources (id) on delete cascade,
+    constraint ck_resource_occupancy_daily_minutos  check (available_minutes >= 0 and booked_minutes >= 0 and bookings_count >= 0)
+);
+
+-- [S2 nueva] Quién cambió qué. La llena un trigger, no la aplicación,
+-- así que nadie puede saltársela. Sólo el administrador la lee.
+create table audit_log (
+    id          bigint       generated always as identity,
+    table_name  varchar(63)  not null,
+    operation   varchar(6)   not null,
+    record_id   text,
+    old_data    jsonb,
+    new_data    jsonb,
+    db_user     varchar(63)  not null default session_user,
+    app_user_id uuid,                          -- el usuario de la app, si la sesión lo informa
+    changed_at  timestamptz  not null default now(),
+    constraint pk_audit_log           primary key (id),
+    constraint ck_audit_log_operation check (operation in ('INSERT', 'UPDATE', 'DELETE')),
+    constraint ck_audit_log_table     check (length(btrim(table_name)) > 0),
+    constraint ck_audit_log_datos check (
+        (operation = 'INSERT' and old_data is null     and new_data is not null) or
+        (operation = 'UPDATE' and old_data is not null and new_data is not null) or
+        (operation = 'DELETE' and old_data is not null and new_data is null))
+);
+
+
+-- =====================================================================
+--  9. Funciones y triggers
+--  Reglas que cruzan tablas: un CHECK no admite subconsultas.
 -- =====================================================================
 
 create or replace function fn_set_updated_at() returns trigger
@@ -510,8 +644,8 @@ begin
     return new;
 end $$;
 
--- Tres reglas: un proveedor pendiente no es reservable (HU-002), un
--- cliente sin verificar no confirma (HU-001) y no se supera el aforo.
+-- S2 (V3 del equipo): cada regla mira sólo el cambio que la afecta, para
+-- que suspender un proveedor no deje sus reservas sin poder cancelarse.
 create or replace function fn_bookings_reglas() returns trigger
 language plpgsql as $$
 declare
@@ -520,34 +654,64 @@ declare
     v_servicio varchar(20);
     v_cupo     integer;
     v_ocupado  integer;
+    v_entra    boolean;   -- pasa a ocupar cupo: se crea o se reactiva
+    v_mueve    boolean;   -- cambia de horario o de sesión
+    v_crece    boolean;   -- suma asistentes
 begin
-    select status into v_cliente from clients where id = new.client_id;
-    select status into v_org     from organizations where id = new.organization_id;
-    select status, customer_capacity into v_servicio, v_cupo
-      from services where id = new.service_id;
-
-    if v_org <> 'ACTIVE' then
-        raise exception 'HU-002: el proveedor está en estado %, no es reservable', v_org;
+    if new.status not in ('RESERVED', 'CONFIRMED') then
+        return new;
     end if;
 
-    if v_servicio <> 'ACTIVE' and new.status in ('RESERVED','CONFIRMED') then
-        raise exception 'HU-004: el servicio está inactivo, no admite reservas nuevas';
+    if tg_op = 'INSERT' then
+        v_entra := true;
+        v_mueve := false;
+        v_crece := false;
+    else
+        v_entra := old.status not in ('RESERVED', 'CONFIRMED');
+        v_mueve := (new.starts_at, new.ends_at, new.session_id)
+                   is distinct from (old.starts_at, old.ends_at, old.session_id);
+        v_crece := new.attendees > old.attendees;
     end if;
 
-    if new.status = 'CONFIRMED' and v_cliente <> 'ACTIVE' then
-        raise exception 'HU-001: sólo un cliente verificado puede confirmar una reserva (estado %)', v_cliente;
+    if v_entra or v_mueve then
+        select status into v_org from organizations where id = new.organization_id;
+        if v_org <> 'ACTIVE' then
+            raise exception 'HU-002: el proveedor está en estado %, no es reservable', v_org;
+        end if;
+
+        select status into v_servicio from services where id = new.service_id;
+        if v_servicio <> 'ACTIVE' then
+            raise exception 'HU-004: el servicio está inactivo, no admite reservas nuevas';
+        end if;
     end if;
 
-    -- Aforo de la sesión
-    select coalesce(sum(attendees), 0) into v_ocupado
-      from bookings
-     where session_id = new.session_id
-       and status in ('RESERVED','CONFIRMED')
-       and id <> new.id;
+    if new.status = 'CONFIRMED' and (tg_op = 'INSERT' or old.status <> 'CONFIRMED') then
+        select status into v_cliente from clients where id = new.client_id;
+        if v_cliente <> 'ACTIVE' then
+            raise exception 'HU-001: sólo un cliente verificado puede confirmar una reserva (estado %)', v_cliente;
+        end if;
+    end if;
 
-    if v_ocupado + new.attendees > v_cupo and new.status in ('RESERVED','CONFIRMED') then
-        raise exception 'HU-004: aforo superado: % ocupados + % solicitados > cupo %',
-              v_ocupado, new.attendees, v_cupo;
+    if v_entra or v_mueve or v_crece then
+        -- Sin este candado, dos reservas simultáneas por el último cupo
+        -- sumaban el mismo ocupado y entraban las dos. Con él, la segunda
+        -- espera a que la primera termine su transacción, y como en READ
+        -- COMMITTED cada sentencia toma una instantánea nueva, su suma ya
+        -- incluye la primera. Se libera solo al terminar la transacción.
+        perform pg_advisory_xact_lock(hashtextextended(new.session_id::text, 0));
+
+        select customer_capacity into v_cupo from services where id = new.service_id;
+
+        select coalesce(sum(attendees), 0) into v_ocupado
+          from bookings
+         where session_id = new.session_id
+           and status in ('RESERVED', 'CONFIRMED')
+           and id <> new.id;
+
+        if v_ocupado + new.attendees > v_cupo then
+            raise exception 'HU-004: aforo superado: % ocupados + % solicitados > cupo %',
+                  v_ocupado, new.attendees, v_cupo;
+        end if;
     end if;
 
     return new;
@@ -569,120 +733,398 @@ begin
     return new;
 end $$;
 
-drop trigger if exists tg_organizations_motivo      on organizations;
-drop trigger if exists tg_organizations_updated_at  on organizations;
-drop trigger if exists tg_locations_updated_at      on locations;
-drop trigger if exists tg_services_updated_at       on services;
-drop trigger if exists tg_resources_updated_at      on resources;
-drop trigger if exists tg_bookings_updated_at       on bookings;
-drop trigger if exists tg_bookings_reglas           on bookings;
+-- S2 (V9 del equipo): búsqueda sin mayúsculas ni tildes (HU-005)
+create or replace function f_sin_tildes(texto text) returns text
+language sql immutable strict parallel safe as $$
+    select translate(lower(texto),
+                     'áàäâãéèëêíìïîóòöôõúùüûñç',
+                     'aaaaaeeeeiiiiooooouuuunc')
+$$;
 
-create trigger tg_organizations_updated_at before update on organizations for each row execute function fn_set_updated_at();
-create trigger tg_locations_updated_at     before update on locations     for each row execute function fn_set_updated_at();
-create trigger tg_services_updated_at      before update on services      for each row execute function fn_set_updated_at();
-create trigger tg_resources_updated_at     before update on resources     for each row execute function fn_set_updated_at();
-create trigger tg_bookings_updated_at      before update on bookings      for each row execute function fn_set_updated_at();
-create trigger tg_bookings_reglas          before insert or update on bookings for each row execute function fn_bookings_reglas();
+-- [S2 nueva] Sólo se califica lo que ya se atendió
+create or replace function fn_booking_reviews_completada() returns trigger
+language plpgsql as $$
+declare
+    v_estado varchar(20);
+begin
+    select status into v_estado from bookings where id = new.booking_id;
+    if v_estado is distinct from 'COMPLETED' then
+        raise exception 'Sólo se puede calificar una reserva completada (estado %)', v_estado;
+    end if;
+    return new;
+end $$;
 
--- HU-003: no se puede suspender ni reactivar una organización sin motivo.
---
--- El trigger se aplica sólo a `organizations`. La misma regla vale para
--- `clients`, pero ahí no se activa todavía: `ConfirmEmailUseCase` mueve el
--- estado a ACTIVE al confirmar el correo y ningún caso de uso escribe aún en
--- `account_status_changes`, así que activarlo rompería HU-001. Se habilita
--- cuando el módulo de identidad registre el motivo en la misma transacción.
+-- [S2 nueva] La reserva en que terminó una espera tiene que ser de ese
+-- cliente, de ese servicio y en esa sede.
+create or replace function fn_waitlist_entries_reserva() returns trigger
+language plpgsql as $$
+begin
+    if new.booking_id is not null and not exists (
+           select 1 from bookings b
+            where b.id = new.booking_id
+              and b.client_id   = new.client_id
+              and b.service_id  = new.service_id
+              and b.location_id = new.location_id) then
+        raise exception 'La reserva % no es del mismo cliente, servicio y sede de la lista de espera', new.booking_id;
+    end if;
+    return new;
+end $$;
+
+-- [S2 nueva] Auditoría genérica. Es security definer para que escriba en
+-- audit_log aunque quien hizo el cambio no tenga permiso sobre esa tabla.
+-- La aplicación puede informar su usuario con: set local app.user_id = '<uuid>'
+create or replace function fn_auditar() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+    v_old jsonb;
+    v_new jsonb;
+    v_app uuid;
+begin
+    if tg_op in ('UPDATE', 'DELETE') then v_old := to_jsonb(old); end if;
+    if tg_op in ('INSERT', 'UPDATE') then v_new := to_jsonb(new); end if;
+
+    if tg_op = 'UPDATE' and v_old = v_new then
+        return null;   -- un update que no cambia nada no deja rastro
+    end if;
+
+    begin
+        v_app := nullif(current_setting('app.user_id', true), '')::uuid;
+    exception when others then
+        v_app := null;  -- un valor mal formado no debe tumbar la transacción
+    end;
+
+    insert into audit_log (table_name, operation, record_id, old_data, new_data, db_user, app_user_id)
+    values (tg_table_name, tg_op, coalesce(v_new, v_old) ->> 'id', v_old, v_new, session_user, v_app);
+    return null;
+end $$;
+
+-- [S2 nueva] Llena resource_occupancy_daily para un día. Disponible = los
+-- bloques de la agenda propia del recurso menos lo que cierran las
+-- excepciones. Ocupado = las reservas vivas o atendidas de ese día,
+-- contadas en la zona horaria de la sede. Se puede repetir: reescribe el día.
+create or replace function fn_calcular_ocupacion(p_dia date) returns integer
+language plpgsql as $$
+declare
+    n integer;
+begin
+    insert into resource_occupancy_daily as rod
+           (resource_id, occupancy_date, available_minutes, booked_minutes, bookings_count)
+    select r.id,
+           p_dia,
+           coalesce(disp.minutos, 0),
+           coalesce(uso.minutos, 0),
+           coalesce(uso.reservas, 0)
+    from resources r
+        inner join locations     l on l.id = r.location_id
+        inner join organizations o on o.id = r.organization_id
+        left join lateral (
+            select sum(extract(epoch from s.end_time - s.start_time) / 60
+                       - coalesce((select sum(extract(epoch from upper(cruce) - lower(cruce)) / 60)
+                                     from agenda_exceptions e,
+                                          lateral (select timerange(s.start_time, s.end_time)
+                                                        * timerange(coalesce(e.start_time, time '00:00'),
+                                                                    coalesce(e.end_time,   time '24:00')) as cruce) x
+                                    where e.agenda_id = a.id
+                                      and e.exception_date = p_dia
+                                      and not isempty(cruce)), 0))::integer as minutos
+            from agendas a
+                inner join schedules s on s.agenda_id = a.id and s.active
+            where a.resource_id = r.id
+              and s.day_of_week = extract(isodow from p_dia)
+              and p_dia >= a.valid_from
+              and (a.valid_until is null or p_dia <= a.valid_until)
+        ) disp on true
+        left join lateral (
+            select (sum(extract(epoch from br.ends_at - br.starts_at)) / 60)::integer as minutos,
+                   count(*)::integer as reservas
+            from booking_resources br
+            where br.resource_id = r.id
+              and br.status in ('RESERVED', 'CONFIRMED', 'COMPLETED')
+              and (br.starts_at at time zone coalesce(l.timezone, o.timezone))::date = p_dia
+        ) uso on true
+    where r.status = 'ACTIVE'
+    on conflict (resource_id, occupancy_date) do update
+       set available_minutes = excluded.available_minutes,
+           booked_minutes    = excluded.booked_minutes,
+           bookings_count    = excluded.bookings_count,
+           calculated_at     = now();
+
+    get diagnostics n = row_count;
+    return n;
+end $$;
+
+create trigger tg_organizations_updated_at before update on organizations    for each row execute function fn_set_updated_at();
+create trigger tg_locations_updated_at     before update on locations        for each row execute function fn_set_updated_at();
+create trigger tg_services_updated_at      before update on services         for each row execute function fn_set_updated_at();
+create trigger tg_resources_updated_at     before update on resources        for each row execute function fn_set_updated_at();
+create trigger tg_agendas_updated_at       before update on agendas          for each row execute function fn_set_updated_at();
+create trigger tg_bookings_updated_at      before update on bookings         for each row execute function fn_set_updated_at();
+create trigger tg_waitlist_entries_updated_at before update on waitlist_entries for each row execute function fn_set_updated_at();
+create trigger tg_booking_reviews_updated_at   before update on booking_reviews  for each row execute function fn_set_updated_at();
+create trigger tg_payments_updated_at      before update on payments         for each row execute function fn_set_updated_at();
+
+create trigger tg_bookings_reglas before insert or update on bookings
+    for each row execute function fn_bookings_reglas();
+
+-- Sólo en organizations. En clients rompería HU-001: la confirmación del
+-- correo cambia el estado sin registrar motivo.
 create trigger tg_organizations_motivo after update of status on organizations
     for each row execute function fn_exige_motivo_cuenta();
 
+create trigger tg_booking_reviews_completada before insert or update of booking_id on booking_reviews
+    for each row execute function fn_booking_reviews_completada();
 
--- =====================================================================
---  Índices
---  PostgreSQL indexa las PK y las unique, pero no las claves foráneas.
---  Aquí sólo van las FK cuya columna no es ya el prefijo de una unique:
---  un índice sobre organization_id sobra si existe
---  unique (organization_id, name).
--- =====================================================================
+create trigger tg_waitlist_entries_reserva before insert or update of booking_id on waitlist_entries
+    for each row execute function fn_waitlist_entries_reserva();
 
--- Una sola política vigente por organización
-create unique index if not exists ux_organization_policies_vigente
-    on organization_policies (organization_id) where replaced_at is null;
-
--- FK no cubiertas por el prefijo de una UNIQUE
-create index if not exists ix_organization_members_user  on organization_members (user_id);
-create index if not exists ix_locations_city             on locations (city_id);
-create index if not exists ix_services_currency          on services (currency_id);
-create index if not exists ix_service_locations_location on service_locations (location_id);
-create index if not exists ix_service_resource_req_type  on service_resource_requirements (resource_type_id);
-create index if not exists ix_resources_type             on resources (resource_type_id);
-create index if not exists ix_schedules_resource         on schedules (resource_id);
-create index if not exists ix_bookings_service           on bookings (service_id);
-create index if not exists ix_bookings_policy            on bookings (policy_id);
-create index if not exists ix_bookings_session           on bookings (session_id);
--- El GiST parcial no ve las canceladas; este sí
-create index if not exists ix_booking_resources_resource on booking_resources (resource_id);
-create index if not exists ix_bsc_booking                on booking_status_changes (booking_id);
-create index if not exists ix_asc_org                    on account_status_changes (organization_id, changed_at desc);
-create index if not exists ix_asc_client                 on account_status_changes (client_id, changed_at desc);
-
--- Consultas frecuentes
-create index if not exists ix_login_attempts_email_time  on login_attempts (email, attempted_at);
-create index if not exists ix_login_attempts_email_lower on login_attempts (lower(email), attempted_at);
-create index if not exists ix_bookings_client_starts     on bookings (client_id, starts_at desc);
-create index if not exists ix_bookings_location_starts   on bookings (location_id, starts_at);
-create index if not exists ix_schedules_location_dow     on schedules (location_id, day_of_week) where active;
-create index if not exists ix_organizations_status       on organizations (status);
+-- Se auditan las tablas donde un cambio tiene consecuencias de negocio o
+-- de seguridad, o donde alguien podría querer cambiar algo sin dejar
+-- rastro, como una calificación. bookings ya tiene su propia historia en
+-- booking_status_changes.
+create trigger tg_auditar_clients               after insert or update or delete on clients               for each row execute function fn_auditar();
+create trigger tg_auditar_organizations         after insert or update or delete on organizations         for each row execute function fn_auditar();
+create trigger tg_auditar_organization_members  after insert or update or delete on organization_members  for each row execute function fn_auditar();
+create trigger tg_auditar_organization_policies after insert or update or delete on organization_policies for each row execute function fn_auditar();
+create trigger tg_auditar_services              after insert or update or delete on services              for each row execute function fn_auditar();
+create trigger tg_auditar_payments              after insert or update or delete on payments              for each row execute function fn_auditar();
+create trigger tg_auditar_booking_reviews       after insert or update or delete on booking_reviews       for each row execute function fn_auditar();
 
 
 -- =====================================================================
---  Comentarios de catálogo
+--  10. Índices
+--  PostgreSQL indexa las PK y las UNIQUE, pero no las FK. Aquí van las
+--  FK que no son ya el prefijo de otra clave, y las consultas frecuentes.
 -- =====================================================================
 
-comment on table cities                        is 'Catálogo de ciudades. Evita repetir la ciudad como texto en perfiles y sedes';
-comment on table organization_categories       is 'Catálogo de categorías de negocio (HU-003 filtra por categoría)';
-comment on table currencies                    is 'Monedas en código ISO 4217. La baja es lógica (active), nunca física';
-comment on table clients                       is 'Sprint 1 · IMPLEMENTADO. Perfil de cliente (HU-001); id = auth.users.id de Supabase';
-comment on table login_attempts                is 'Sprint 1 · IMPLEMENTADO. Intentos de login para el bloqueo por cuenta (HU-021)';
-comment on table organizations                 is 'Negocio proveedor (HU-002). Queda PENDING_APPROVAL hasta que un administrador lo valide';
-comment on table organization_members          is 'Relación N:M entre personas y organizaciones, con el rol de cada quien';
-comment on table organization_policies         is 'Reglas de operación VERSIONADAS (HU-002). Cada cambio crea una versión; las reservas conservan la suya';
-comment on table locations                     is 'Sedes de una organización. HU-002 exige al menos una para publicar servicios';
-comment on table services                      is 'Servicios ofertados (HU-004). customer_capacity = 1 individual, > 1 grupal';
+-- Sprint 1
+create unique index ux_clients_email_lower           on clients (lower(email));
+create unique index ux_organization_policies_vigente on organization_policies (organization_id) where replaced_at is null;
+create index ix_organization_members_user  on organization_members (user_id);
+create index ix_locations_city             on locations (city_id);
+create index ix_services_currency          on services (currency_id);
+create index ix_service_locations_location on service_locations (location_id);
+create index ix_service_resource_req_type  on service_resource_requirements (resource_type_id);
+create index ix_resources_type             on resources (resource_type_id);
+create index ix_bookings_service           on bookings (service_id);
+create index ix_bookings_policy            on bookings (policy_id);
+create index ix_bookings_session           on bookings (session_id);
+create index ix_booking_resources_resource on booking_resources (resource_id);
+create index ix_bsc_booking                on booking_status_changes (booking_id);
+create index ix_asc_org                    on account_status_changes (organization_id, changed_at desc);
+create index ix_asc_client                 on account_status_changes (client_id, changed_at desc);
+create index ix_login_attempts_email_time  on login_attempts (email, attempted_at);
+create index ix_login_attempts_email_lower on login_attempts (lower(email), attempted_at);
+create index ix_bookings_client_starts     on bookings (client_id, starts_at desc);
+create index ix_bookings_location_starts   on bookings (location_id, starts_at);
+create index ix_organizations_status       on organizations (status);
+
+-- Cambios del equipo en el Sprint 2 (V6 a V8)
+create index ix_sent_emails_recipient   on sent_emails (lower(recipient), sent_at desc);
+create index ix_resources_organization  on resources (organization_id);
+create index ix_agenda_services_service on agenda_services (service_id);
+create index ix_agendas_resource        on agendas (resource_id);
+
+-- [S2 nuevos]
+-- El EXCLUDE de schedules es parcial (where active) y no sirve para el
+-- "delete from schedules where agenda_id = ?" con que el backend reescribe
+-- los bloques, ni para el borrado en cascada de una agenda.
+create index ix_schedules_agenda           on schedules (agenda_id);
+create index ix_waitlist_entries_service_location on waitlist_entries (service_id, location_id, desired_date);
+create index ix_waitlist_entries_client           on waitlist_entries (client_id);
+-- Un cliente no se anota dos veces a lo mismo mientras siga esperando
+create unique index ux_waitlist_entries_activa     on waitlist_entries (client_id, service_id, location_id, desired_date)
+    where status in ('WAITING', 'NOTIFIED');
+create index ix_payments_booking           on payments (booking_id);
+-- Un solo pago vivo por reserva
+create unique index ux_payments_vigente    on payments (booking_id) where status in ('PENDING', 'PAID');
+create index ix_resource_occupancy_daily_date on resource_occupancy_daily (occupancy_date);
+create index ix_audit_log_registro on audit_log (table_name, record_id, changed_at desc);
+
+
+-- =====================================================================
+--  11. Comentarios de catálogo
+-- =====================================================================
+
+comment on table cities                        is 'Catálogo de ciudades, con departamento';
+comment on table organization_categories       is 'Catálogo de categorías de negocio';
+comment on table currencies                    is 'Monedas ISO 4217. La baja es lógica (active)';
+comment on table clients                       is 'Perfil del cliente (HU-001); id = auth.users.id de Supabase. Implementada por el equipo';
+comment on table login_attempts                is 'Intentos de ingreso para el bloqueo por cuenta (HU-021). Implementada por el equipo';
+comment on table organizations                 is 'Negocio proveedor (HU-002). PENDING_APPROVAL hasta que un administrador lo apruebe';
+comment on table organization_members          is 'Quién trabaja en qué proveedor y con qué rol (ADR-0008)';
+comment on table organization_policies         is 'Reglas de anticipación y cancelación, versionadas (HU-002)';
+comment on table locations                     is 'Sedes de un proveedor';
+comment on table services                      is 'Servicios ofertados (HU-004). customer_capacity 1 = individual, > 1 = grupal';
 comment on table service_locations             is 'En qué sedes se presta cada servicio (HU-004)';
-comment on table resource_types                is 'Tipos de recurso NO consumibles: sala, silla de barbero, hidrolavadora, especialista';
-comment on table service_resource_requirements is 'Cuántos recursos de cada tipo exige un servicio para poder ejecutarse';
-comment on table resources                     is 'Instancia concreta de un tipo de recurso, en una sede. Es lo que realmente se ocupa';
-comment on table schedules                     is 'Franjas semanales de disponibilidad. resource_id nulo = aplica a toda la sede';
+comment on table resource_types                is 'Tipos de recurso no consumible: sala, silla, especialista';
+comment on table service_resource_requirements is 'Cuántos recursos de cada tipo exige un servicio';
+comment on table resources                     is 'Recurso concreto en una sede, con capacidad y estado (HU-009)';
+comment on table resource_maintenances         is 'Periodos de mantenimiento: el recurso no genera disponibilidad (HU-009)';
+comment on table agendas                       is 'Agenda de una sede o de un recurso: granularidad, vigencia y servicios (HU-006)';
+comment on table agenda_services               is 'Servicios reservables en una agenda (HU-006)';
+comment on table schedules                     is 'Bloques horarios semanales de una agenda (HU-006)';
+comment on table agenda_exceptions             is 'Festivos, cierres y jornadas recortadas de una agenda';
 comment on table bookings                      is 'Reserva. policy_id congela las condiciones vigentes al crearla (HU-002)';
-comment on table booking_resources             is 'Recursos ocupados. El EXCLUDE impide que un recurso sirva a dos sesiones solapadas';
-comment on table booking_status_changes        is 'Historia de estados de una RESERVA, con motivo obligatorio al cancelar';
-comment on table account_status_changes        is 'Historia de estados de CUENTAS: aprobar, suspender y reactivar exigen motivo (HU-003)';
+comment on table booking_resources             is 'Recursos ocupados por una reserva; el EXCLUDE impide la sobreocupación';
+comment on table booking_status_changes        is 'Historia de estados de una reserva';
+comment on table account_status_changes        is 'Historia de estados de cuentas, con motivo obligatorio (HU-003)';
+comment on table booking_reviews               is 'Calificación de 1 a 5 de una reserva completada';
+comment on table waitlist_entries              is 'Lista de espera por servicio, sede y día';
+comment on table payments                      is 'Pagos y reembolsos de una reserva';
+comment on table sent_emails                   is 'Correos guardados en vez de enviados por SMTP (ADR-0007)';
+comment on table resource_occupancy_daily      is 'Ocupación diaria por recurso, calculada por fn_calcular_ocupacion';
+comment on table audit_log                     is 'Auditoría de cambios en tablas sensibles, escrita por trigger';
 
-comment on column clients.city                      is 'Texto libre, heredado del mapeo JPA. El catálogo cities sí se usa en locations';
-comment on column locations.timezone                is 'Nulo = hereda la de la organización. Es un override explícito, no una copia de la ciudad';
-comment on column services.customer_capacity        is 'Cupo por sesión. 1 = individual; mayor que 1 = grupal (HU-004)';
-comment on column services.preparation_minutes      is 'Minutos de alistamiento antes de prestar el servicio';
-comment on column services.cleanup_minutes          is 'Minutos de limpieza después de prestar el servicio';
-comment on column organization_policies.version     is 'Se incrementa en 1 cada vez que la organización cambia sus parámetros';
-comment on column organization_policies.replaced_at is 'Nulo mientras la política esté vigente. Sólo puede haber una vigente por organización';
-comment on column bookings.session_id               is 'Sesión del servicio. Individual: una por reserva. Grupal: compartida, y por eso comparten recurso';
-comment on column bookings.total_price              is 'Precio pactado al reservar. NO es copia de services.price: ese puede cambiar después, así que no hay dependencia funcional';
-comment on column booking_resources.starts_at       is 'Copia del rango de la reserva, mantenida por el motor vía CF compuesta con on update cascade';
-comment on column schedules.day_of_week             is 'Día ISO: 1 = lunes … 7 = domingo';
+comment on column bookings.total_price           is 'Precio pactado al reservar. No es copia de services.price, que puede cambiar';
+comment on column bookings.session_id            is 'Individual: una por reserva. Grupal: compartida, y por eso comparten recurso';
+comment on column booking_resources.starts_at    is 'Copia del rango de la reserva, mantenida por la FK compuesta con on update cascade';
+comment on column audit_log.app_user_id          is 'Usuario de la aplicación, tomado de set local app.user_id si la sesión lo informa';
+
+
+-- =====================================================================
+--  12. Seguridad: roles, permisos y RLS
+--
+--  Tres roles de grupo, sin login. Una persona o un servicio entra con
+--  un usuario propio que hereda de uno de ellos, por ejemplo:
+--      create role app_bookingplatform login password '...' in role rol_app;
+--  Las contraseñas no van en este archivo.
+--
+--    rol_admin    migraciones y mantenimiento: todo
+--    rol_app      el backend: sólo lo que el código hace
+--    rol_lectura  reportes: leer, sin datos personales ni de seguridad
+--
+--  La matriz completa y su justificación están en el README.
+-- =====================================================================
+
+do $$
+begin
+    if not exists (select 1 from pg_roles where rolname = 'rol_admin')   then create role rol_admin   nologin; end if;
+    if not exists (select 1 from pg_roles where rolname = 'rol_app')     then create role rol_app     nologin; end if;
+    if not exists (select 1 from pg_roles where rolname = 'rol_lectura') then create role rol_lectura nologin; end if;
+end $$;
+
+-- Nadie recibe nada por defecto
+revoke create on schema public from public;
+revoke all on all tables    in schema public from public;
+revoke all on all sequences in schema public from public;
+-- Las dos funciones que se invocan a mano. Las de trigger no hace falta:
+-- PostgreSQL no revisa permisos al dispararlas.
+revoke all on function f_sin_tildes(text), fn_calcular_ocupacion(date) from public;
+
+grant usage  on schema public to rol_admin, rol_app, rol_lectura;
+grant create on schema public to rol_admin;
+
+-- rol_admin: todo
+grant all     on all tables    in schema public to rol_admin;
+grant all     on all sequences in schema public to rol_admin;
+grant execute on all functions in schema public to rol_admin;
+
+-- rol_app: catálogos de solo lectura (se cargan por migración)
+grant select on cities, organization_categories, currencies to rol_app;
+
+-- rol_app: tablas operativas, leer, crear y modificar
+grant select, insert, update on
+    clients, organizations, organization_members, organization_policies, locations,
+    services, service_locations, resource_types, service_resource_requirements,
+    resources, resource_maintenances, agendas, agenda_services, schedules, agenda_exceptions,
+    bookings, booking_resources, booking_reviews, waitlist_entries, payments
+to rol_app;
+
+-- rol_app: historiales, sólo se agregan filas. Si la aplicación pudiera
+-- editarlos, dejarían de servir como evidencia de lo que pasó.
+grant select, insert on login_attempts, booking_status_changes, account_status_changes, sent_emails to rol_app;
+grant usage on sequence login_attempts_id_seq to rol_app;
+
+-- rol_app: los únicos borrados que hace el backend. ManageServiceUseCase
+-- borra un servicio que nunca se reservó y AgendaRepositoryAdapter
+-- reescribe los bloques de una agenda. Una excepción de agenda mal
+-- puesta también tiene que poder quitarse.
+grant delete on services, schedules, agenda_exceptions to rol_app;
+
+-- rol_app: lee la ocupación para mostrarla; la calcula el administrador
+grant select on resource_occupancy_daily to rol_app;
+grant execute on function f_sin_tildes(text) to rol_app, rol_lectura;
+-- audit_log: rol_app no la toca. La escribe fn_auditar (security definer).
+
+-- rol_lectura: todo para leer, menos datos personales y de seguridad
+grant select on all tables in schema public to rol_lectura;
+revoke select on clients, login_attempts, sent_emails, audit_log from rol_lectura;
+-- Un proveedor puede ser una persona natural (V4): su documento, su
+-- correo y su teléfono son datos personales. El comentario de una reseña
+-- es texto libre del cliente. De esas dos tablas, sólo ciertas columnas.
+revoke select on organizations, booking_reviews from rol_lectura;
+grant select (id, category_id, name, timezone, status, approved_at, created_at, updated_at) on organizations to rol_lectura;
+grant select (id, booking_id, rating, created_at, updated_at) on booking_reviews to rol_lectura;
+
+-- RLS en todas las tablas (ADR-0002 del equipo). Con RLS activo y sin
+-- políticas nadie distinto del dueño ve filas, así que cada rol propio
+-- recibe una política explícita. Las políticas abren filas; lo que cada
+-- rol puede HACER lo siguen limitando los GRANT de arriba. El control por
+-- organización lo hace el backend (OrganizationAccess, ADR-0008).
+do $$
+declare
+    t text;
+begin
+    for t in select tablename from pg_tables where schemaname = 'public' loop
+        execute format('alter table public.%I enable row level security', t);
+        execute format('create policy %I on public.%I to rol_admin using (true) with check (true)', t || '_admin', t);
+        execute format('create policy %I on public.%I to rol_app using (true) with check (true)', t || '_app', t);
+        execute format('create policy %I on public.%I for select to rol_lectura using (true)', t || '_lectura', t);
+    end loop;
+end $$;
+
+-- Supabase: los roles del Data API (anon, authenticated) sólo existen
+-- allá. Sin acceso a nada, salvo los catálogos públicos y lo propio de
+-- cada cliente. En un PostgreSQL local este bloque no hace nada.
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'anon')
+       and exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                    where n.nspname = 'auth' and p.proname = 'uid') then
+
+        execute 'revoke all on all tables    in schema public from anon, authenticated';
+        execute 'revoke all on all sequences in schema public from anon, authenticated';
+        execute 'revoke all on all functions in schema public from anon, authenticated';
+
+        -- Catálogos: no son datos sensibles
+        execute 'grant select on cities, organization_categories, currencies to anon, authenticated';
+        execute 'create policy cities_publico     on cities                  for select to anon, authenticated using (true)';
+        execute 'create policy categorias_publico on organization_categories for select to anon, authenticated using (true)';
+        execute 'create policy monedas_publico    on currencies              for select to anon, authenticated using (true)';
+
+        -- Cada cliente ve sus reservas, su lista de espera y sus reseñas
+        execute 'grant select on bookings, waitlist_entries, booking_reviews to authenticated';
+        execute 'create policy reservas_propias on bookings for select to authenticated
+                     using (client_id = (select auth.uid()))';
+        execute 'create policy espera_propia    on waitlist_entries for select to authenticated
+                     using (client_id = (select auth.uid()))';
+        execute 'create policy resenas_propias  on booking_reviews for select to authenticated
+                     using (exists (select 1 from bookings b
+                                     where b.id = booking_id and b.client_id = (select auth.uid())))';
+
+        raise notice 'Políticas de Supabase creadas para anon y authenticated';
+    else
+        raise notice 'Sin roles de Supabase (PostgreSQL local): se omiten las políticas del Data API';
+    end if;
+end $$;
 
 
 -- =====================================================================
 --  Lo que este esquema NO garantiza
 --
---   · Que una reserva ocupe los recursos que su servicio exige.
---     service_resource_requirements dice cuántos hacen falta, pero nada
---     obliga a insertar las filas en booking_resources.
---   · Que una organización activa tenga al menos una sede, ni que un
---     servicio activo declare sedes y tipos de recurso. Son
---     cardinalidades mínimas entre tablas.
---   · Contraseñas, MFA, sesiones y enlaces de un solo uso de HU-021:
---     viven en Supabase Auth, fuera de este esquema.
---   · El rol de administrador de plataforma. organization_members.role
---     modela roles dentro de una organización, no el rol global.
---   · Excepciones de agenda como festivos o mantenimientos.
+--   · Que una reserva ocupe los recursos que su servicio exige:
+--     service_resource_requirements dice cuántos, pero nada obliga a
+--     insertar las filas en booking_resources.
+--   · Que una reserva caiga dentro de un bloque de agenda, fuera de una
+--     excepción y fuera de un mantenimiento. Lo valida el backend al
+--     ofrecer franjas.
+--   · Que una excepción de agenda caiga dentro de la vigencia de la agenda.
+--   · fn_calcular_ocupacion sólo cuenta agendas propias del recurso; un
+--     recurso que sólo depende de la agenda de su sede queda con 0
+--     minutos disponibles. Tampoco descuenta mantenimientos.
+--   · ck_clients_adult usa current_date, que no es inmutable: un
+--     pg_dump/restore años después puede rechazar filas. Es del equipo
+--     y no se cambia.
+--   · Contraseñas, MFA y sesiones: viven en Supabase Auth.
 --   · Que timezone sea una zona real de la IANA.
 -- =====================================================================

@@ -1,155 +1,212 @@
 -- =====================================================================
---  Las reglas de integridad en acción
---  Sprint 1
+--  Las reglas de integridad y de seguridad en acción
+--  Sprint 2
 --
---  Las restricciones declaradas en el CREATE TABLE las hace cumplir el
---  motor, no la aplicación. Cada instrucción de este archivo viola una
---  regla de negocio a propósito, y todas deben ser rechazadas.
+--  Cada instrucción de la primera y la segunda parte viola una regla a
+--  propósito, y todas deben ser rechazadas. La tercera parte hace lo que
+--  rol_app sí puede hacer, dentro de una transacción que se deshace.
 --
---  Uso:  psql -f schema.sql -f seed.sql -f pruebas-integridad.sql
---  Se ejecuta SIN ON_ERROR_STOP para que se vean los dieciocho rechazos.
---  Usa metacomandos de psql, así que se ejecuta con `psql -f`.
+--  Las dieciocho pruebas del Sprint 1 siguen en sprint-1/pruebas-integridad.sql.
+--
+--  Uso:  psql -d reservas -f pruebas-integridad.sql
+--  Se ejecuta SIN ON_ERROR_STOP para que se vean todos los rechazos.
 -- =====================================================================
 
 \set ON_ERROR_STOP off
 
+\echo ''
+\echo '#####################  Parte 1: calidad de los datos  #####################'
 
 \echo ''
-\echo '--- 1. Clave candidata: el NIT ya está registrado (HU-002) ---'
-insert into organizations (category_id, name, nit, contact_email, contact_phone)
-values ('22222222-0000-0000-0000-000000000001', 'Otra Clínica', '900123456-1', 'x@y.com', '6040000000');
+\echo '--- 1. Calificar una reserva que todavía no se ha atendido ---'
+insert into booking_reviews (booking_id, rating) values ('dddd0000-0000-0000-0000-000000000001', 5);
+
+\echo ''
+\echo '--- 2. Clave candidata: una segunda reseña para la misma reserva ---'
+insert into booking_reviews (booking_id, rating) values ('dddd0000-0000-0000-0000-000000000005', 3);
+
+\echo ''
+\echo '--- 3. Dominio: una calificación de 6 ---'
+insert into booking_reviews (booking_id, rating) values ('dddd0000-0000-0000-0000-000000000010', 6);
+
+\echo ''
+\echo '--- 4. Dominio: una reseña con el comentario en blanco ---'
+insert into booking_reviews (booking_id, rating, comment) values ('dddd0000-0000-0000-0000-000000000010', 4, '   ');
+
+\echo ''
+\echo '--- 5. Una excepción de agenda con hora de inicio pero sin hora de fin ---'
+insert into agenda_exceptions (agenda_id, exception_date, start_time, reason)
+select id, current_date + 20, time '08:00', 'Media jornada' from agendas where resource_id = 'cccc0000-0000-0000-0000-000000000001';
+
+\echo ''
+\echo '--- 6. Una excepción que se pisa con el festivo ya registrado ese día ---'
+insert into agenda_exceptions (agenda_id, exception_date, start_time, end_time, reason)
+select id, current_date + 7, time '10:00', time '12:00', 'Reunión' from agendas where resource_id = 'cccc0000-0000-0000-0000-000000000001';
+
+\echo ''
+\echo '--- 7. Anotarse dos veces en la lista de espera del mismo taller y día ---'
+insert into waitlist_entries (client_id, service_id, location_id, desired_date)
+values ('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000003',
+        '88888888-0000-0000-0000-000000000001', (now() + interval '5 days')::date);
+
+\echo ''
+\echo '--- 8. Una entrada marcada como BOOKED que no apunta a ninguna reserva ---'
+insert into waitlist_entries (client_id, service_id, location_id, desired_date, status)
+values ('44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000001',
+        '88888888-0000-0000-0000-000000000001', current_date + 2, 'BOOKED');
+
+\echo ''
+\echo '--- 9. Integridad referencial: esperar un servicio en una sede donde no se presta ---'
+insert into waitlist_entries (client_id, service_id, location_id, desired_date)
+values ('44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000004',
+        '88888888-0000-0000-0000-000000000001', current_date + 2);
+
+\echo ''
+\echo '--- 10. Un segundo pago vivo para una reserva que ya está pagada ---'
+insert into payments (booking_id, amount, currency_id, method)
+values ('dddd0000-0000-0000-0000-000000000001', 35000, '33333333-0000-0000-0000-000000000001', 'CARD');
+
+\echo ''
+\echo '--- 11. Un pago marcado como PAID sin fecha de pago ---'
+insert into payments (booking_id, amount, currency_id, method, status)
+values ('dddd0000-0000-0000-0000-000000000002', 45000, '33333333-0000-0000-0000-000000000001', 'CARD', 'PAID');
+
+\echo ''
+\echo '--- 12. Un reembolso con fecha anterior al pago ---'
+insert into payments (booking_id, amount, currency_id, method, status, paid_at, refunded_at)
+values ('dddd0000-0000-0000-0000-000000000002', 45000, '33333333-0000-0000-0000-000000000001', 'CARD',
+        'REFUNDED', now(), now() - interval '1 day');
+
+\echo ''
+\echo '--- 13. Dominio: un pago por cero pesos ---'
+insert into payments (booking_id, amount, currency_id, method)
+values ('dddd0000-0000-0000-0000-000000000002', 0, '33333333-0000-0000-0000-000000000001', 'CASH');
+
+\echo ''
+\echo '--- 14. Clave candidata: dos pagos con la misma referencia de la pasarela ---'
+insert into payments (booking_id, amount, currency_id, method, status, external_reference)
+values ('dddd0000-0000-0000-0000-000000000002', 45000, '33333333-0000-0000-0000-000000000001', 'CARD',
+        'FAILED', 'TX-1001');
 
 
 \echo ''
-\echo '--- 2. Restricción de dominio: anticipación mínima mayor que la máxima (HU-002) ---'
-insert into organization_policies (organization_id, version, booking_notice_minutes_min,
-                                   booking_notice_minutes_max, free_cancellation_window_minutes)
-values ('66666666-0000-0000-0000-000000000002', 2, 5000, 100, 60);
+\echo '--- 15. Un pago marcado como reembolsado sin fecha de reembolso ---'
+insert into payments (booking_id, amount, currency_id, method, status, paid_at)
+values ('dddd0000-0000-0000-0000-000000000002', 45000, '33333333-0000-0000-0000-000000000001', 'CARD',
+        'REFUNDED', now());
+
+\echo ''
+\echo '--- 16. Una lista de espera que dice haber terminado en la reserva de otro cliente ---'
+insert into waitlist_entries (client_id, service_id, location_id, desired_date, status, booking_id, notified_at)
+values ('44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000002',
+        '88888888-0000-0000-0000-000000000001', current_date + 3, 'BOOKED',
+        'dddd0000-0000-0000-0000-000000000002', now());
+
+\echo ''
+\echo '--- 17. Una entrada avisada sin fecha de aviso ---'
+insert into waitlist_entries (client_id, service_id, location_id, desired_date, status)
+values ('44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000001',
+        '88888888-0000-0000-0000-000000000001', current_date + 4, 'NOTIFIED');
 
 
 \echo ''
-\echo '--- 3. Dos políticas vigentes a la vez en la misma organización (HU-002) ---'
-insert into organization_policies (organization_id, version, booking_notice_minutes_min,
-                                   booking_notice_minutes_max, free_cancellation_window_minutes)
-values ('66666666-0000-0000-0000-000000000001', 3, 60, 1000, 60);
+\echo '#####################  Parte 2: mínimo privilegio  #####################'
+
+\echo ''
+\echo '--- 18. rol_app borra una reserva: el backend nunca borra reservas, las cancela ---'
+set role rol_app;
+delete from bookings where id = 'dddd0000-0000-0000-0000-000000000006';
+reset role;
+
+\echo ''
+\echo '--- 19. rol_app edita un historial: sólo puede agregarle filas ---'
+set role rol_app;
+update booking_status_changes set reason = 'otro motivo';
+reset role;
+
+\echo ''
+\echo '--- 20. rol_app lee la auditoría: sólo la ve el administrador ---'
+set role rol_app;
+select count(*) from audit_log;
+reset role;
+
+\echo ''
+\echo '--- 21. rol_app crea una tabla: los cambios de esquema son de rol_admin ---'
+set role rol_app;
+create table tabla_intrusa (id int);
+reset role;
+
+\echo ''
+\echo '--- 22. rol_app cambia un catálogo: se cargan por migración ---'
+set role rol_app;
+insert into currencies (code, name) values ('EUR', 'Euro');
+reset role;
+
+\echo ''
+\echo '--- 23. rol_lectura lee datos personales de los clientes ---'
+set role rol_lectura;
+select full_name, email from clients;
+reset role;
+
+\echo ''
+\echo '--- 24. rol_lectura modifica una reserva: sólo lee ---'
+set role rol_lectura;
+update bookings set attendees = 2 where id = 'dddd0000-0000-0000-0000-000000000002';
+reset role;
 
 
 \echo ''
-\echo '--- 4. Una organización activa sin fecha de aprobación (HU-002) ---'
-insert into organizations (category_id, name, nit, contact_email, contact_phone, status)
-values ('22222222-0000-0000-0000-000000000001', 'Sin Aprobar', '903000000-9', 'a@b.com', '6040000001', 'ACTIVE');
+\echo '--- 25. rol_lectura lee el documento y el teléfono de un proveedor ---'
+set role rol_lectura;
+select name, identification_number, contact_phone from organizations;
+reset role;
 
 
 \echo ''
-\echo '--- 5. Clave candidata: nombre de servicio repetido en el mismo proveedor (HU-004) ---'
-insert into services (organization_id, name, duration_minutes, price, currency_id)
-values ('66666666-0000-0000-0000-000000000001', 'Corte clásico', 30, 35000,
-        '33333333-0000-0000-0000-000000000001');
+\echo '#####################  Parte 3: lo que rol_app sí puede  #####################'
+\echo 'Reserva, paga y reescribe una agenda como lo hace el backend. Al final se'
+\echo 'deshace todo. Si alguna línea dice ERROR, a rol_app le falta un permiso.'
 
+begin;
+set local role rol_app;
 
-\echo ''
-\echo '--- 6. Restricción de dominio: un servicio con cupo cero (HU-004) ---'
-insert into services (organization_id, name, duration_minutes, price, currency_id, customer_capacity)
-values ('66666666-0000-0000-0000-000000000001', 'Servicio sin cupo', 30, 1000,
-        '33333333-0000-0000-0000-000000000001', 0);
-
-
-\echo ''
-\echo '--- 7. Integridad referencial: reservar un servicio en una sede donde no se presta (HU-004) ---'
-insert into bookings (client_id, organization_id, service_id, location_id, policy_id, session_id,
+insert into bookings (id, client_id, organization_id, service_id, location_id, policy_id, session_id,
                       starts_at, ends_at, total_price)
-values ('44444444-0000-0000-0000-000000000001', '66666666-0000-0000-0000-000000000001',
-        'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000002',
-        '77777777-0000-0000-0000-000000000002', gen_random_uuid(),
-        now() + interval '9 days', now() + interval '9 days' + interval '45 minutes', 45000);
+values ('eeee0000-0000-0000-0000-000000000001', '44444444-0000-0000-0000-000000000004',
+        '66666666-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000002',
+        '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002',
+        'eeee0000-0000-0000-0000-000000000001', now() + interval '9 days',
+        now() + interval '9 days' + interval '45 minutes', 45000);
 
+insert into payments (booking_id, amount, currency_id, method)
+values ('eeee0000-0000-0000-0000-000000000001', 45000, '33333333-0000-0000-0000-000000000001', 'CARD');
 
-\echo ''
-\echo '--- 8. Integridad referencial: mezclar organizaciones en una misma reserva ---'
-insert into bookings (client_id, organization_id, service_id, location_id, policy_id, session_id,
-                      starts_at, ends_at, total_price)
-values ('44444444-0000-0000-0000-000000000001', '66666666-0000-0000-0000-000000000001',
-        'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001',
-        '77777777-0000-0000-0000-000000000003', gen_random_uuid(),
-        now() + interval '9 days', now() + interval '9 days' + interval '30 minutes', 35000);
+update services set description = 'Perfilado y afeitado con navaja caliente'
+ where id = 'aaaa0000-0000-0000-0000-000000000002';
 
+delete from schedules
+ where agenda_id = (select id from agendas where resource_id = 'cccc0000-0000-0000-0000-000000000004');
 
-\echo ''
-\echo '--- 9. Un cliente sin verificar confirma una reserva (HU-001) ---'
-insert into bookings (client_id, organization_id, service_id, location_id, policy_id, session_id,
-                      starts_at, ends_at, total_price, status)
-values ('44444444-0000-0000-0000-000000000005', '66666666-0000-0000-0000-000000000001',
-        'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001',
-        '77777777-0000-0000-0000-000000000002', gen_random_uuid(),
-        now() + interval '9 days', now() + interval '9 days' + interval '30 minutes', 35000, 'CONFIRMED');
+select count(*) as servicios_con_tilde from services where f_sin_tildes(name) like '%clasico%';
 
+rollback;
 
 \echo ''
-\echo '--- 10. Aforo: más asistentes que el cupo del servicio (HU-004) ---'
-insert into bookings (client_id, organization_id, service_id, location_id, policy_id, session_id,
-                      starts_at, ends_at, attendees, total_price)
-values ('44444444-0000-0000-0000-000000000001', '66666666-0000-0000-0000-000000000001',
-        'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001',
-        '77777777-0000-0000-0000-000000000002', gen_random_uuid(),
-        now() + interval '9 days', now() + interval '9 days' + interval '30 minutes', 500, 35000);
-
-
-\echo ''
-\echo '--- 11. Sobreocupación: otra sesión usando el mismo recurso en franja solapada ---'
-insert into booking_resources (booking_id, resource_id, location_id, session_id, starts_at, ends_at, status)
-select 'dddd0000-0000-0000-0000-000000000002', 'cccc0000-0000-0000-0000-000000000005',
-       '88888888-0000-0000-0000-000000000001', gen_random_uuid(), starts_at, ends_at, status
-from   bookings
-where  id = 'dddd0000-0000-0000-0000-000000000003';
-
-
-\echo ''
-\echo '--- 12. Desincronizar la ocupación del estado de su reserva ---'
-update booking_resources
-set    status = 'CANCELLED'
-where  booking_id = 'dddd0000-0000-0000-0000-000000000001';
-
-
-\echo ''
-\echo '--- 13. Franja de agenda solapada con otra del mismo recurso ---'
-insert into schedules (location_id, resource_id, day_of_week, start_time, end_time)
-values ('88888888-0000-0000-0000-000000000001', 'cccc0000-0000-0000-0000-000000000001', 1, '07:00', '23:00');
-
-
-\echo ''
-\echo '--- 14. Borrar una reserva que tiene historial de auditoría (HU-003) ---'
-delete from bookings where id = 'dddd0000-0000-0000-0000-000000000001';
-
-
-\echo ''
-\echo '--- 15. Suspender una organización sin registrar el motivo (HU-003) ---'
-update organizations set status = 'SUSPENDED' where id = '66666666-0000-0000-0000-000000000001';
-
-
-\echo ''
-\echo '--- 16. Obligatoriedad y dominio: cliente con correo inválido (HU-001) ---'
-insert into clients values (gen_random_uuid(), 'Correo Malo', '8888', '1990-01-01',
-                           'no-es-un-correo', '3009998877', 'Medellín', 'EMAIL', 'ACTIVE',
-                           localtimestamp, localtimestamp);
-
-
-\echo ''
-\echo '--- 17. Clave candidata: el mismo correo con otra capitalización (HU-001) ---'
-insert into clients values (gen_random_uuid(), 'Clon', '9999', '1990-01-01',
-                           'MARIANA@example.com', '3009998877', 'Medellín', 'EMAIL', 'ACTIVE',
-                           localtimestamp, localtimestamp);
-
-
-\echo ''
-\echo '--- 18. Restricción de dominio: autorregistro de un menor de edad (HU-001) ---'
-insert into clients values (gen_random_uuid(), 'Menor de Edad', '7777', current_date - interval '10 years',
-                           'menor@example.com', '3001112233', 'Medellín', 'EMAIL', 'ACTIVE',
-                           localtimestamp, localtimestamp);
+\echo 'Y rol_lectura sí hace su reporte: calificaciones por servicio, sin datos personales.'
+begin;
+set local role rol_lectura;
+select o.name as proveedor, s.name as servicio, round(avg(br.rating), 2) as promedio
+from booking_reviews br
+    inner join bookings      b on b.id = br.booking_id
+    inner join services      s on s.id = b.service_id
+    inner join organizations o on o.id = s.organization_id
+group by o.name, s.name
+order by promedio desc;
+rollback;
 
 
 \echo ''
 \echo '====================================================================='
-\echo ' Las dieciocho instrucciones anteriores debieron ser rechazadas.'
-\echo ' Si alguna dice INSERT, UPDATE o DELETE en vez de ERROR, hay una'
-\echo ' regla de negocio que la base no está garantizando.'
+\echo ' Las pruebas 1 a 25 debieron terminar en ERROR, y la parte 3 sin'
+\echo ' ningún ERROR. Si no, hay una regla o un permiso mal puesto.'
 \echo '====================================================================='

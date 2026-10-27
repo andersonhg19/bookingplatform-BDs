@@ -1,6 +1,6 @@
 -- =====================================================================
 --  Datos de prueba — Plataforma de Reservas de Servicios
---  Sprint 1
+--  Sprint 2
 --
 --  Se ejecuta DESPUÉS de schema.sql. Carga un escenario pequeño pero
 --  completo, pensado para que TODAS las consultas clave devuelvan
@@ -9,21 +9,25 @@
 --  Es re-ejecutable: empieza vaciando las tablas.
 --
 --  AVISO: el `truncate` de abajo BORRA TODO. Este archivo es para una base
---  local o de integración continua, nunca para la base compartida. La guarda
---  aborta si el nombre de la base no es `reservas`.
+--  local, nunca para la base compartida. La guarda aborta si la base no se
+--  llama `reservas`.
+--
+--  La primera parte es el escenario del Sprint 1, que el equipo ya ajustó a
+--  sus migraciones V7 y V8. La segunda llena las tablas nuevas del Sprint 2.
 -- =====================================================================
 
 do $$
 begin
-    if current_database() not in ('reservas', 'postgres', 'r', 'prod', 'aud') then
+    if current_database() <> 'reservas' then
         raise exception
             'seed.sql borra todos los datos y la base actual es "%". Ejecútalo sólo en local o en CI.',
             current_database();
     end if;
 end $$;
 
-truncate table account_status_changes, booking_status_changes, booking_resources,
-               bookings, schedules, resources, service_resource_requirements,
+truncate table audit_log, resource_occupancy_daily, payments, waitlist_entries, booking_reviews, agenda_exceptions,
+               account_status_changes, booking_status_changes, booking_resources,
+               bookings, schedules, agenda_services, agendas, resource_maintenances, sent_emails, resources, service_resource_requirements,
                service_locations, services, resource_types, locations,
                organization_policies, organization_members, organizations,
                login_attempts, clients,
@@ -66,7 +70,7 @@ insert into login_attempts (email, success, attempted_at) values
     ('mariana@example.com', true,  now() - interval '10 minutes');
 
 -- ---------- organizaciones ----------
-insert into organizations (id, category_id, name, nit, contact_email, contact_phone, timezone, status, approved_at, created_at, updated_at) values
+insert into organizations (id, category_id, name, identification_number, contact_email, contact_phone, timezone, status, approved_at, created_at, updated_at) values
     ('66666666-0000-0000-0000-000000000001', '22222222-0000-0000-0000-000000000002', 'Barbería El Poblado', '900123456-1', 'contacto@barberia.com', '6041112233', 'America/Bogota', 'ACTIVE', now() - interval '60 days', now() - interval '65 days', now() - interval '10 days'),
     ('66666666-0000-0000-0000-000000000002', '22222222-0000-0000-0000-000000000001', 'Clínica Dental Sur',  '901234567-2', 'citas@dentalsur.com',   '6042223344', 'America/Bogota', 'ACTIVE', now() - interval '30 days', now() - interval '35 days', now() - interval '30 days'),
     -- Pendiente hace 45 días: no es visible NI reservable (HU-002),
@@ -129,23 +133,36 @@ insert into service_resource_requirements (service_id, resource_type_id, organiz
     ('aaaa0000-0000-0000-0000-000000000004', 'bbbb0000-0000-0000-0000-000000000003', '66666666-0000-0000-0000-000000000002', 1),
     ('aaaa0000-0000-0000-0000-000000000005', 'bbbb0000-0000-0000-0000-000000000003', '66666666-0000-0000-0000-000000000002', 1);
 
-insert into resources (id, resource_type_id, location_id, name, status) values
-    ('cccc0000-0000-0000-0000-000000000001', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', 'Silla 1', 'ACTIVE'),
-    ('cccc0000-0000-0000-0000-000000000002', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', 'Silla 2', 'ACTIVE'),
-    ('cccc0000-0000-0000-0000-000000000003', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', 'Silla 3', 'ACTIVE'),
-    ('cccc0000-0000-0000-0000-000000000004', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', 'Silla 4', 'ACTIVE'),
-    ('cccc0000-0000-0000-0000-000000000005', 'bbbb0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', 'Salón principal', 'ACTIVE'),
-    ('cccc0000-0000-0000-0000-000000000006', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002', 'Silla única', 'ACTIVE'),
-    ('cccc0000-0000-0000-0000-000000000007', 'bbbb0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000003', 'Unidad A', 'ACTIVE'),
-    ('cccc0000-0000-0000-0000-000000000008', 'bbbb0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000003', 'Unidad B', 'INACTIVE');
+-- capacity: personas que el recurso atiende a la vez (V7). El salón del taller recibe al grupo.
+insert into resources (id, organization_id, resource_type_id, location_id, name, capacity, status) values
+    ('cccc0000-0000-0000-0000-000000000001', '66666666-0000-0000-0000-000000000001', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', 'Silla 1', 1, 'ACTIVE'),
+    ('cccc0000-0000-0000-0000-000000000002', '66666666-0000-0000-0000-000000000001', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', 'Silla 2', 1, 'ACTIVE'),
+    ('cccc0000-0000-0000-0000-000000000003', '66666666-0000-0000-0000-000000000001', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', 'Silla 3', 1, 'ACTIVE'),
+    ('cccc0000-0000-0000-0000-000000000004', '66666666-0000-0000-0000-000000000001', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', 'Silla 4', 1, 'ACTIVE'),
+    ('cccc0000-0000-0000-0000-000000000005', '66666666-0000-0000-0000-000000000001', 'bbbb0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', 'Salón principal', 12, 'ACTIVE'),
+    ('cccc0000-0000-0000-0000-000000000006', '66666666-0000-0000-0000-000000000001', 'bbbb0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002', 'Silla única', 1, 'ACTIVE'),
+    ('cccc0000-0000-0000-0000-000000000007', '66666666-0000-0000-0000-000000000002', 'bbbb0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000003', 'Unidad A', 1, 'ACTIVE'),
+    ('cccc0000-0000-0000-0000-000000000008', '66666666-0000-0000-0000-000000000002', 'bbbb0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000003', 'Unidad B', 1, 'RETIRED');
 
--- ---------- agenda: lunes a viernes 8:00-18:00, sábado 8:00-13:00 ----------
-insert into schedules (location_id, resource_id, day_of_week, start_time, end_time, active)
-select r.location_id, r.id, d.dow, time '08:00',
-       case when d.dow in (6, 7) then time '13:00' else time '18:00' end, true
+-- ---------- agendas (V8): una por recurso activo ----------
+-- Granularidad de 30 minutos, vigente desde hace un mes y sin fecha de fin,
+-- con los servicios que se prestan en su sede. Bloques de lunes a viernes
+-- 8:00-18:00 y fines de semana 8:00-13:00.
+insert into agendas (organization_id, location_id, resource_id, name, slot_minutes, valid_from)
+select r.organization_id, r.location_id, r.id, 'Agenda ' || r.name, 30, current_date - 30
 from resources r
-cross join (select generate_series(1, 7) as dow) d
 where r.status = 'ACTIVE';
+
+insert into agenda_services (agenda_id, service_id, location_id)
+select a.id, sl.service_id, a.location_id
+from agendas a
+    inner join service_locations sl on sl.location_id = a.location_id;
+
+insert into schedules (agenda_id, day_of_week, start_time, end_time, active)
+select a.id, d.dow, time '08:00',
+       case when d.dow in (6, 7) then time '13:00' else time '18:00' end, true
+from agendas a
+cross join (select generate_series(1, 7) as dow) d;
 
 -- ---------- reservas ----------
 -- session_id: en servicios individuales coincide con el id de la reserva;
@@ -186,3 +203,98 @@ insert into booking_status_changes (booking_id, from_status, to_status, reason, 
     ('dddd0000-0000-0000-0000-000000000001', 'RESERVED',  'CONFIRMED', null,                                 '99999999-0000-0000-0000-000000000001'),
     ('dddd0000-0000-0000-0000-000000000005', 'CONFIRMED', 'COMPLETED', null,                                 '99999999-0000-0000-0000-000000000002'),
     ('dddd0000-0000-0000-0000-000000000006', 'RESERVED',  'CANCELLED', 'El cliente solicitó la cancelación', '44444444-0000-0000-0000-000000000003');
+
+
+-- =====================================================================
+--  Sprint 2: tablas nuevas
+-- =====================================================================
+
+-- ---------- más reservas atendidas, para reseñas y reportes ----------
+-- COMPLETED y NO_SHOW no pasan por las reglas de cupo: ya ocurrieron
+insert into bookings (id, client_id, organization_id, service_id, location_id, policy_id, session_id, starts_at, ends_at, attendees, total_price, status) values
+    ('dddd0000-0000-0000-0000-000000000009', '44444444-0000-0000-0000-000000000003', '66666666-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000009', now() - interval '8 days',  now() - interval '8 days'  + interval '30 minutes', 1, 35000.00, 'COMPLETED'),
+    ('dddd0000-0000-0000-0000-000000000010', '44444444-0000-0000-0000-000000000004', '66666666-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000004', '88888888-0000-0000-0000-000000000003', '77777777-0000-0000-0000-000000000003', 'dddd0000-0000-0000-0000-000000000010', now() - interval '3 days',  now() - interval '3 days'  + interval '40 minutes', 1, 90000.00, 'COMPLETED'),
+    ('dddd0000-0000-0000-0000-000000000011', '44444444-0000-0000-0000-000000000001', '66666666-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000011', now() - interval '12 days', now() - interval '12 days' + interval '30 minutes', 1, 35000.00, 'NO_SHOW');
+
+insert into booking_resources (booking_id, resource_id, location_id, session_id, starts_at, ends_at, status)
+select b.id, a.resource_id, b.location_id, b.session_id, b.starts_at, b.ends_at, b.status
+from bookings b
+join (values
+    ('dddd0000-0000-0000-0000-000000000009'::uuid, 'cccc0000-0000-0000-0000-000000000003'::uuid),
+    ('dddd0000-0000-0000-0000-000000000010'::uuid, 'cccc0000-0000-0000-0000-000000000007'::uuid),
+    ('dddd0000-0000-0000-0000-000000000011'::uuid, 'cccc0000-0000-0000-0000-000000000001'::uuid)
+) as a(booking_id, resource_id) on a.booking_id = b.id;
+
+-- ---------- excepciones de agenda ----------
+-- Festivo en toda la Sede Poblado dentro de una semana, una jornada
+-- recortada en la clínica mañana y un cierre que ya pasó, para que se
+-- note en la ocupación.
+insert into agenda_exceptions (agenda_id, exception_date, start_time, end_time, reason)
+select a.id, current_date + 7, null, null, 'Festivo'
+from agendas a
+where a.location_id = '88888888-0000-0000-0000-000000000001';
+
+insert into agenda_exceptions (agenda_id, exception_date, start_time, end_time, reason)
+select a.id, current_date + 1, time '14:00', time '18:00', 'Capacitación del personal'
+from agendas a
+where a.resource_id = 'cccc0000-0000-0000-0000-000000000007';
+
+insert into agenda_exceptions (agenda_id, exception_date, start_time, end_time, reason)
+select a.id, current_date - 5, null, null, 'Cierre por fumigación'
+from agendas a
+where a.resource_id = 'cccc0000-0000-0000-0000-000000000003';
+
+-- ---------- mantenimiento que choca con una reserva viva ----------
+-- La silla 2 entra a mantenimiento justo cuando Laura tiene su barba:
+-- la consulta 20 lo detecta.
+insert into resource_maintenances (resource_id, starts_at, ends_at, reason) values
+    ('cccc0000-0000-0000-0000-000000000002', now() + interval '3 days' - interval '1 hour', now() + interval '3 days' + interval '2 hours', 'Cambio de tapicería');
+
+-- ---------- reseñas ----------
+-- La reserva 10 queda sin reseña a propósito: la consulta 22 la encuentra
+insert into booking_reviews (booking_id, rating, comment, created_at) values
+    ('dddd0000-0000-0000-0000-000000000005', 4, 'Buen resultado, aunque la espera fue larga', now() - interval '19 days'),
+    ('dddd0000-0000-0000-0000-000000000007', 5, 'Muy buena atención',                         now() - interval '24 days'),
+    ('dddd0000-0000-0000-0000-000000000009', 5, null,                                         now() - interval '7 days');
+
+-- ---------- lista de espera ----------
+-- El taller grupal está lleno (8 de 8): Laura y Daniela esperan cupo
+insert into waitlist_entries (client_id, service_id, location_id, desired_date, attendees, status, booking_id, notified_at, created_at) values
+    ('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', (now() + interval '5 days')::date, 1, 'WAITING', null, null,                      now() - interval '2 days'),
+    ('44444444-0000-0000-0000-000000000005', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', (now() + interval '5 days')::date, 2, 'WAITING', null, null,                      now() - interval '1 days'),
+    -- Se le avisó y no tomó el cupo a tiempo
+    ('44444444-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', current_date - 10,                 1, 'EXPIRED', null, now() - interval '11 days', now() - interval '12 days'),
+    -- Esta sí terminó en reserva: la barba de Laura
+    ('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', (now() + interval '3 days')::date, 1, 'BOOKED', 'dddd0000-0000-0000-0000-000000000002', now() - interval '4 days', now() - interval '5 days');
+
+-- ---------- pagos ----------
+insert into payments (booking_id, amount, currency_id, method, status, external_reference, paid_at, refunded_at, created_at) values
+    ('dddd0000-0000-0000-0000-000000000001',  35000.00, '33333333-0000-0000-0000-000000000001', 'CARD',          'PAID',     'TX-1001', now() - interval '1 days',  null,                     now() - interval '1 days'),
+    ('dddd0000-0000-0000-0000-000000000003', 180000.00, '33333333-0000-0000-0000-000000000001', 'BANK_TRANSFER', 'PAID',     'TX-1002', now() - interval '2 days',  null,                     now() - interval '2 days'),
+    ('dddd0000-0000-0000-0000-000000000008',  60000.00, '33333333-0000-0000-0000-000000000001', 'CARD',          'PENDING',  null,      null,                      null,                     now() - interval '1 hours'),
+    -- Primer intento rechazado, segundo aprobado
+    ('dddd0000-0000-0000-0000-000000000004',  90000.00, '33333333-0000-0000-0000-000000000001', 'CARD',          'FAILED',   'TX-1003', null,                      null,                     now() - interval '2 days'),
+    ('dddd0000-0000-0000-0000-000000000004',  90000.00, '33333333-0000-0000-0000-000000000001', 'CARD',          'PAID',     'TX-1004', now() - interval '2 days',  null,                     now() - interval '2 days'),
+    ('dddd0000-0000-0000-0000-000000000005', 250000.00, '33333333-0000-0000-0000-000000000001', 'CASH',          'PAID',     null,      now() - interval '20 days', null,                     now() - interval '20 days'),
+    ('dddd0000-0000-0000-0000-000000000007',  40000.00, '33333333-0000-0000-0000-000000000001', 'CARD',          'PAID',     'TX-0990', now() - interval '25 days', null,                     now() - interval '25 days'),
+    ('dddd0000-0000-0000-0000-000000000009',  35000.00, '33333333-0000-0000-0000-000000000001', 'CASH',          'PAID',     null,      now() - interval '8 days',  null,                     now() - interval '8 days'),
+    ('dddd0000-0000-0000-0000-000000000010',  90000.00, '33333333-0000-0000-0000-000000000001', 'CARD',          'PAID',     'TX-1005', now() - interval '3 days',  null,                     now() - interval '3 days'),
+    -- La reserva cancelada se había pagado y se devolvió
+    ('dddd0000-0000-0000-0000-000000000006',  35000.00, '33333333-0000-0000-0000-000000000001', 'CARD',          'REFUNDED', 'TX-1006', now() - interval '3 days',  now() - interval '1 days', now() - interval '3 days');
+
+-- ---------- bandeja de correo (V6 del equipo) ----------
+insert into sent_emails (recipient, subject, body, sent_at) values
+    ('mariana@example.com', 'Tu reserva quedó confirmada', 'Corte clásico en Sede Poblado. Te esperamos.', now() - interval '1 days'),
+    ('laura@example.com',   'Se liberó un cupo',           'Hay cupo para Barba y afeitado. Ya quedó tu reserva.', now() - interval '4 days');
+
+-- ---------- un cambio auditado ----------
+-- El dueño de la barbería sube el precio del corte. Las reservas ya hechas
+-- conservan los 35000 pactados; audit_log guarda el antes y el después.
+begin;
+set local app.user_id = '99999999-0000-0000-0000-000000000001';
+update services set price = 38000.00 where id = 'aaaa0000-0000-0000-0000-000000000001';
+commit;
+
+-- ---------- ocupación diaria: el último mes y la próxima semana ----------
+select sum(fn_calcular_ocupacion(d::date)) as filas_de_ocupacion
+from generate_series(current_date - 30, current_date + 7, interval '1 day') d;
