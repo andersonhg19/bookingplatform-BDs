@@ -97,8 +97,8 @@ migración nueva de ellos (V10 en adelante) junto con el ajuste de sus entidades
 
 ## 1. MER refinado
 
-Son 30 tablas, así que primero va una vista general por dominios y después tres vistas de entidad
-relación con las claves, los atributos principales y las cardinalidades. En las vistas de detalle, las tablas nuevas del sprint dicen
+Son 30 tablas, así que primero va un mapa por dominios y después tres vistas de entidad-relación con
+las claves, los atributos principales y las cardinalidades. En las vistas de detalle, las tablas nuevas del sprint dicen
 **S2 nueva** en su clave primaria y las que normalicé dicen **S2 normalizada**.
 
 `auth.users` la gestiona Supabase Auth y no se crea aquí. Por eso `clients.id`,
@@ -106,108 +106,36 @@ relación con las claves, los atributos principales y las cardinalidades. En las
 
 ### Vista general
 
-Cada flecha va de la tabla padre (1) a la hija (N); las punteadas son relaciones opcionales. **Verde:** tabla nueva del Sprint 2. **Amarillo:** tabla que normalicé en este sprint.
+Los ocho dominios del modelo y de qué depende cada uno. **✚** marca una tabla nueva del Sprint 2 y **✱** una tabla que normalicé en este sprint. Las relaciones tabla por tabla, con sus cardinalidades, están en las tres vistas de abajo.
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 320}}}%%
 flowchart LR
-    subgraph CAT["Catálogos"]
-        cities
-        organization_categories
-        currencies
-    end
-    subgraph IDE["Identidad"]
-        clients
-        client_status_changes
-        login_attempts
-    end
-    subgraph ORG["Organización"]
-        organizations
-        organization_members
-        organization_policies
-        organization_status_changes
-        locations
-    end
-    subgraph SER["Servicios y recursos"]
-        services
-        service_locations
-        resource_types
-        service_resource_requirements
-        resources
-        resource_maintenances
-    end
-    subgraph AGE["Agendas"]
-        agendas
-        agenda_services
-        schedules
-        agenda_exceptions
-    end
-    subgraph RES["Reservas y pagos"]
-        bookings
-        booking_resources
-        booking_status_changes
-        booking_reviews
-        waitlist_entries
-        payments
-    end
-    subgraph REP["Reportes"]
-        resource_occupancy_daily
-    end
-    subgraph AUD["Notificaciones y auditoría"]
-        sent_emails
-        audit_log
-    end
+    CAT["<b>Catálogos</b><br/>cities<br/>organization_categories<br/>currencies"]
+    IDE["<b>Identidad</b><br/>clients ✱<br/>client_status_changes ✱<br/>login_attempts ✱"]
+    ORG["<b>Organización</b><br/>organizations<br/>organization_members ✱<br/>organization_policies<br/>organization_status_changes ✱<br/>locations"]
+    SER["<b>Servicios y recursos</b><br/>services<br/>service_locations ✱<br/>resource_types<br/>service_resource_requirements ✱<br/>resources ✱<br/>resource_maintenances"]
+    AGE["<b>Agendas</b><br/>agendas ✱<br/>agenda_services ✱<br/>schedules<br/>agenda_exceptions ✚"]
+    RES["<b>Reservas y pagos</b><br/>bookings ✱<br/>booking_resources ✱<br/>booking_status_changes<br/>booking_reviews ✚<br/>waitlist_entries ✚<br/>payments ✚"]
+    REP["<b>Reportes</b><br/>resource_occupancy_daily ✚"]
+    AUD["<b>Notificaciones y auditoría</b><br/>sent_emails<br/>audit_log ✚"]
 
-    cities --> clients
-    cities --> locations
-    clients --> client_status_changes
-    organization_categories --> organizations
-    organizations --> organization_members
-    organizations --> organization_policies
-    organizations --> organization_status_changes
-    organizations --> locations
-    organizations --> services
-    organizations --> resource_types
-    currencies --> services
-    services --> service_locations
-    locations --> service_locations
-    services --> service_resource_requirements
-    resource_types --> service_resource_requirements
-    resource_types --> resources
-    locations --> resources
-    resources --> resource_maintenances
-    resources --> resource_occupancy_daily
-    locations --> agendas
-    resources -.-> agendas
-    agendas --> agenda_services
-    services --> agenda_services
-    agendas --> schedules
-    agendas --> agenda_exceptions
-    clients --> bookings
-    service_locations --> bookings
-    organization_policies --> bookings
-    currencies --> bookings
-    bookings --> booking_resources
-    resources --> booking_resources
-    bookings --> booking_status_changes
-    bookings --> booking_reviews
-    bookings --> payments
-    currencies --> payments
-    clients --> waitlist_entries
-    service_locations --> waitlist_entries
-    bookings -.-> waitlist_entries
+    CAT -->|ciudad, categoría| ORG
+    CAT -->|ciudad| IDE
+    CAT -->|moneda| SER
+    ORG -->|proveedor y sede| SER
+    SER -->|sede y recurso| AGE
+    SER -->|servicio en sede, recurso| RES
+    IDE -->|cliente| RES
+    ORG -->|política| RES
+    CAT -->|moneda| RES
+    SER -->|recurso| REP
+    RES -. registra .-> AUD
+    ORG -. registra .-> AUD
+    IDE -. registra .-> AUD
 
-    classDef nueva fill:#d8f3dc,stroke:#2d6a4f,color:#1b4332
-    classDef normalizada fill:#fff3bf,stroke:#b08900,color:#5c4400
-    class agenda_exceptions,booking_reviews,waitlist_entries,payments,resource_occupancy_daily,audit_log nueva
-    class clients,client_status_changes,login_attempts,organization_members,organization_status_changes,service_locations,service_resource_requirements,resources,agendas,agenda_services,bookings,booking_resources normalizada
-    style CAT fill:#f8f9fa,stroke:#adb5bd
-    style IDE fill:#f8f9fa,stroke:#adb5bd
-    style ORG fill:#f8f9fa,stroke:#adb5bd
-    style SER fill:#f8f9fa,stroke:#adb5bd
-    style AGE fill:#f8f9fa,stroke:#adb5bd
-    style RES fill:#f8f9fa,stroke:#adb5bd
-    style REP fill:#f8f9fa,stroke:#adb5bd
-    style AUD fill:#f8f9fa,stroke:#adb5bd
+    classDef dominio fill:#f8f9fa,stroke:#495057,color:#212529,text-align:left
+    class CAT,IDE,ORG,SER,AGE,RES,REP,AUD dominio
 ```
 
 ### Identidad y organización
