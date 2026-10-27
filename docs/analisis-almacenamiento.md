@@ -8,7 +8,7 @@ con el volumen estimado para el final del primer año usando
 [`generar-volumen.sql`](generar-volumen.sql), que usa una semilla fija para que los conteos se puedan
 reproducir.
 
-| | |
+| Dato | Valor |
 |---|---|
 | Tabla analizada | `bookings` |
 | Volumen (fin del año 1) | TR = 1 584 000 reservas, de la [estimación de volumen](../README.md#5-estimación-de-volumen) |
@@ -124,7 +124,7 @@ que está lleno a la mitad.
 
 Con las 1 584 000 reservas cargadas en orden aleatorio, como llegarían en producción:
 
-| | Calculado | Medido | |
+| Medida | Calculado | Medido | Diferencia |
 |---|---|---|---|
 | Páginas de `bookings` | 36 838 | 39 600 | +7,5 % |
 | Registros por página | 43 | 40 | |
@@ -355,7 +355,7 @@ final sobre las 8 filas del resultado.
 
 ### 5.4 Por qué es más barata
 
-| | E₀ | E₁ |
+| Medida | E₀ | E₁ |
 |---|---|---|
 | Tuplas que salen de S hacia la reunión | 5 440 | 8 |
 | Tuplas que salen de B hacia la reunión | 1 584 000 | 1 584 000 × (1/12) × 0,75 = 99 000 |
