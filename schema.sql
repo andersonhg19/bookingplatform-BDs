@@ -6,7 +6,7 @@
 --  sus restricciones, índices, triggers, roles y políticas.
 --
 --  Parte del esquema que el equipo tiene en producción (Sprint 1 más sus
---  migraciones V3 a V9) y lo normaliza (BCNF salvo dos tablas, ver README):
+--  migraciones V3 a V9) y lo normaliza (las excepciones, en el README):
 --    · Quita las columnas que se repetían para armar claves foráneas
 --      compuestas (organization_id en sedes de servicio, recursos,
 --      requisitos, agendas y reservas; location_id en agenda_services y
@@ -101,8 +101,9 @@ create table clients (
     constraint ck_clients_document  check (length(btrim(document)) > 0),
     constraint ck_clients_email     check (email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$'),
     constraint ck_clients_phone     check (phone ~ '^\+?[0-9]{7,15}$')
-    -- La mayoría de edad (HU-001) va en un trigger: un CHECK con
-    -- current_date no es inmutable y un restore años después lo violaría.
+    -- La mayoría de edad (HU-001) va en un trigger: PostgreSQL da por hecho
+    -- que un CHECK es inmutable, y uno con current_date no lo es. Además la
+    -- regla vale para el momento del registro, no para siempre.
 );
 
 -- Soporta el bloqueo por cuenta de HU-021. El correo no es FK a clients:
@@ -555,6 +556,7 @@ create table waitlist_entries (
     created_at   timestamptz not null default now(),
     updated_at   timestamptz not null default now(),
     constraint pk_waitlist_entries                  primary key (id),
+    constraint uk_waitlist_entries_booking          unique (booking_id),   -- una reserva sale de a lo sumo una espera
     constraint fk_waitlist_entries_client           foreign key (client_id) references clients (id) on delete cascade,
     constraint fk_waitlist_entries_service_location foreign key (service_id, location_id) references service_locations (service_id, location_id) on delete cascade,
     constraint fk_waitlist_entries_booking          foreign key (booking_id) references bookings (id) on delete restrict,
@@ -696,7 +698,7 @@ declare
     v_cupo     integer;
     v_ocupado  integer;
     v_entra    boolean;   -- pasa a ocupar cupo: se crea o se reactiva
-    v_mueve    boolean;   -- cambia de horario o de sesión
+    v_mueve    boolean;   -- cambia de horario, de sesión, de servicio o de sede
     v_crece    boolean;   -- suma asistentes
 begin
     if new.status not in ('RESERVED', 'CONFIRMED') then
@@ -709,8 +711,8 @@ begin
         v_crece := false;
     else
         v_entra := old.status not in ('RESERVED', 'CONFIRMED');
-        v_mueve := (new.starts_at, new.ends_at, new.session_id)
-                   is distinct from (old.starts_at, old.ends_at, old.session_id);
+        v_mueve := (new.starts_at, new.ends_at, new.session_id, new.service_id, new.location_id)
+                   is distinct from (old.starts_at, old.ends_at, old.session_id, old.service_id, old.location_id);
         v_crece := new.attendees > old.attendees;
     end if;
 
@@ -759,15 +761,18 @@ begin
     return new;
 end $$;
 
--- Lo que antes garantizaban las FK compuestas con organization_id. Son
--- cinco reglas de la misma forma: dos cosas que se relacionan tienen que
--- ser del mismo proveedor, o estar en la misma sede.
+-- Lo que antes garantizaban las FK compuestas con organization_id y
+-- location_id repetidos. Todas tienen la misma forma: dos cosas que se
+-- relacionan tienen que ser del mismo proveedor, o estar en la misma sede.
+-- Si alguna de las dos no existe, la regla no opina: ese error lo da la FK.
 
 create or replace function fn_service_locations_mismo_proveedor() returns trigger
 language plpgsql as $$
+declare
+    v_servicio uuid := (select organization_id from services  where id = new.service_id);
+    v_sede     uuid := (select organization_id from locations where id = new.location_id);
 begin
-    if (select organization_id from services  where id = new.service_id) is distinct from
-       (select organization_id from locations where id = new.location_id) then
+    if v_servicio <> v_sede then
         raise exception 'El servicio % y la sede % son de proveedores distintos', new.service_id, new.location_id;
     end if;
     return new;
@@ -775,20 +780,42 @@ end $$;
 
 create or replace function fn_service_resource_requirements_mismo_proveedor() returns trigger
 language plpgsql as $$
+declare
+    v_servicio uuid := (select organization_id from services       where id = new.service_id);
+    v_tipo     uuid := (select organization_id from resource_types where id = new.resource_type_id);
 begin
-    if (select organization_id from services       where id = new.service_id) is distinct from
-       (select organization_id from resource_types where id = new.resource_type_id) then
+    if v_servicio <> v_tipo then
         raise exception 'El servicio % y el tipo de recurso % son de proveedores distintos', new.service_id, new.resource_type_id;
     end if;
     return new;
 end $$;
 
-create or replace function fn_resources_mismo_proveedor() returns trigger
+-- Un recurso: su tipo y su sede son del mismo proveedor. Y si ya atendió
+-- reservas, no se cambia de sede: esas reservas quedarían en una sede
+-- donde el recurso no estaba. Se retira y se crea otro.
+create or replace function fn_resources_coherencia() returns trigger
+language plpgsql as $$
+declare
+    v_tipo uuid := (select organization_id from resource_types where id = new.resource_type_id);
+    v_sede uuid := (select organization_id from locations      where id = new.location_id);
+begin
+    if v_tipo <> v_sede then
+        raise exception 'El tipo de recurso % y la sede % son de proveedores distintos', new.resource_type_id, new.location_id;
+    end if;
+    if tg_op = 'UPDATE' and new.location_id <> old.location_id
+       and exists (select 1 from booking_resources where resource_id = new.id) then
+        raise exception 'El recurso % ya tiene reservas: no se cambia de sede, se retira y se crea otro', new.id;
+    end if;
+    return new;
+end $$;
+
+-- El proveedor de una sede, un servicio o un tipo de recurso no cambia.
+-- Así las reglas de "mismo proveedor" no se pueden romper desde arriba.
+create or replace function fn_proveedor_inmutable() returns trigger
 language plpgsql as $$
 begin
-    if (select organization_id from resource_types where id = new.resource_type_id) is distinct from
-       (select organization_id from locations      where id = new.location_id) then
-        raise exception 'El tipo de recurso % y la sede % son de proveedores distintos', new.resource_type_id, new.location_id;
+    if new.organization_id <> old.organization_id then
+        raise exception '%: el proveedor de un registro no cambia', tg_table_name;
     end if;
     return new;
 end $$;
@@ -807,8 +834,36 @@ begin
     return new;
 end $$;
 
--- La política tiene que ser del proveedor del servicio, y al crear la
--- reserva el precio se pacta en la moneda del servicio.
+-- Si una agenda se cambia de sede, sus servicios tienen que prestarse en la nueva
+create or replace function fn_agendas_servicios_en_sede() returns trigger
+language plpgsql as $$
+begin
+    if exists (select 1
+                 from agenda_services ags
+                where ags.agenda_id = new.id
+                  and not exists (select 1 from service_locations sl
+                                   where sl.service_id = ags.service_id
+                                     and sl.location_id = new.location_id)) then
+        raise exception 'La agenda % tiene servicios que no se prestan en la sede %', new.id, new.location_id;
+    end if;
+    return new;
+end $$;
+
+-- Un servicio que deja de prestarse en una sede deja de ser reservable en
+-- las agendas de esa sede
+create or replace function fn_service_locations_quita_de_agendas() returns trigger
+language plpgsql as $$
+begin
+    delete from agenda_services ags
+     using agendas a
+     where a.id = ags.agenda_id
+       and a.location_id = old.location_id
+       and ags.service_id = old.service_id;
+    return old;
+end $$;
+
+-- Una reserva: la política es del proveedor del servicio, y el precio se
+-- pacta en la moneda del servicio y ya no cambia de moneda.
 create or replace function fn_bookings_coherencia() returns trigger
 language plpgsql as $$
 declare
@@ -818,21 +873,51 @@ begin
     select organization_id, currency_id into v_org_servicio, v_moneda
       from services where id = new.service_id;
 
-    if (select organization_id from organization_policies where id = new.policy_id) is distinct from v_org_servicio then
+    if (select organization_id from organization_policies where id = new.policy_id) <> v_org_servicio then
         raise exception 'La política % no es del proveedor del servicio %', new.policy_id, new.service_id;
     end if;
-    if tg_op = 'INSERT' and new.currency_id is distinct from v_moneda then
+    if tg_op = 'UPDATE' and new.currency_id <> old.currency_id then
+        raise exception 'La moneda del precio pactado no cambia';
+    end if;
+    if (tg_op = 'INSERT' or new.service_id <> old.service_id) and new.currency_id <> v_moneda then
         raise exception 'El precio se pacta en la moneda del servicio';
     end if;
+    -- Si la reserva cambia de sede, los recursos que ya tiene tienen que estar en la nueva
+    if tg_op = 'UPDATE' and new.location_id <> old.location_id
+       and exists (select 1 from booking_resources br
+                       inner join resources r on r.id = br.resource_id
+                    where br.booking_id = new.id
+                      and r.location_id <> new.location_id) then
+        raise exception 'La reserva % tiene recursos de otra sede', new.id;
+    end if;
     return new;
+end $$;
+
+-- Las reservas que comparten sesión (servicio grupal) comparten servicio,
+-- sede y horario: son la misma sesión. Se revisa al final de la
+-- transacción, para que mover una sesión entera, reserva por reserva, no
+-- falle a mitad de camino.
+create or replace function fn_bookings_misma_sesion() returns trigger
+language plpgsql as $$
+begin
+    if exists (select 1 from bookings b
+                where b.session_id = new.session_id
+                  and b.id <> new.id
+                  and (b.service_id, b.location_id, b.starts_at, b.ends_at)
+                      is distinct from (new.service_id, new.location_id, new.starts_at, new.ends_at)) then
+        raise exception 'Las reservas de la sesión % no coinciden en servicio, sede u horario', new.session_id;
+    end if;
+    return null;
 end $$;
 
 -- El recurso tiene que estar en la sede de la reserva
 create or replace function fn_booking_resources_en_sede() returns trigger
 language plpgsql as $$
+declare
+    v_recurso uuid := (select location_id from resources where id = new.resource_id);
+    v_reserva uuid := (select location_id from bookings  where id = new.booking_id);
 begin
-    if (select location_id from resources where id = new.resource_id) is distinct from
-       (select location_id from bookings  where id = new.booking_id) then
+    if v_recurso <> v_reserva then
         raise exception 'El recurso % no está en la sede de la reserva %', new.resource_id, new.booking_id;
     end if;
     return new;
@@ -906,8 +991,9 @@ begin
     if tg_op in ('UPDATE', 'DELETE') then v_old := to_jsonb(old); end if;
     if tg_op in ('INSERT', 'UPDATE') then v_new := to_jsonb(new); end if;
 
-    if tg_op = 'UPDATE' and v_old = v_new then
-        return null;   -- un update que no cambia nada no deja rastro
+    -- Un update que sólo toca updated_at no cambió nada que importe
+    if tg_op = 'UPDATE' and v_old - 'updated_at' = v_new - 'updated_at' then
+        return null;
     end if;
 
     -- La clave primaria de la fila, sirva para cualquier tabla
@@ -1008,7 +1094,7 @@ create trigger tg_organizations_motivo after update of status on organizations
     for each row execute function fn_exige_motivo_cuenta();
 create trigger tg_booking_reviews_completada before insert or update of booking_id on booking_reviews
     for each row execute function fn_booking_reviews_completada();
-create trigger tg_waitlist_entries_reserva before insert or update of booking_id on waitlist_entries
+create trigger tg_waitlist_entries_reserva before insert or update of booking_id, client_id, service_id, location_id on waitlist_entries
     for each row execute function fn_waitlist_entries_reserva();
 
 -- Coherencia entre tablas, en lugar de las FK compuestas
@@ -1016,12 +1102,25 @@ create trigger tg_service_locations_mismo_proveedor before insert or update on s
     for each row execute function fn_service_locations_mismo_proveedor();
 create trigger tg_service_resource_requirements_mismo_proveedor before insert or update on service_resource_requirements
     for each row execute function fn_service_resource_requirements_mismo_proveedor();
-create trigger tg_resources_mismo_proveedor before insert or update of resource_type_id, location_id on resources
-    for each row execute function fn_resources_mismo_proveedor();
+create trigger tg_resources_coherencia before insert or update of resource_type_id, location_id on resources
+    for each row execute function fn_resources_coherencia();
+create trigger tg_locations_proveedor_inmutable before update of organization_id on locations
+    for each row execute function fn_proveedor_inmutable();
+create trigger tg_services_proveedor_inmutable before update of organization_id on services
+    for each row execute function fn_proveedor_inmutable();
+create trigger tg_resource_types_proveedor_inmutable before update of organization_id on resource_types
+    for each row execute function fn_proveedor_inmutable();
 create trigger tg_agenda_services_en_sede before insert or update on agenda_services
     for each row execute function fn_agenda_services_en_sede();
-create trigger tg_bookings_coherencia before insert or update of service_id, policy_id, currency_id on bookings
+create trigger tg_agendas_servicios_en_sede before update of location_id on agendas
+    for each row execute function fn_agendas_servicios_en_sede();
+create trigger tg_service_locations_quita_de_agendas after delete on service_locations
+    for each row execute function fn_service_locations_quita_de_agendas();
+create trigger tg_bookings_coherencia before insert or update of service_id, location_id, policy_id, currency_id on bookings
     for each row execute function fn_bookings_coherencia();
+create constraint trigger tg_bookings_misma_sesion after insert or update of session_id, service_id, location_id, starts_at, ends_at on bookings
+    deferrable initially deferred
+    for each row execute function fn_bookings_misma_sesion();
 create trigger tg_booking_resources_en_sede before insert or update of resource_id, booking_id on booking_resources
     for each row execute function fn_booking_resources_en_sede();
 
@@ -1067,7 +1166,9 @@ create index ix_agenda_services_service              on agenda_services (service
 -- "delete from schedules where agenda_id = ?" con que el backend reescribe
 -- los bloques, ni para el borrado en cascada de una agenda.
 create index ix_schedules_agenda                     on schedules (agenda_id);
-create index ix_bookings_service                     on bookings (service_id);
+-- Sirve a la FK por service_id (es el prefijo) y a los reportes de un
+-- servicio en un rango de fechas. Ver docs/analisis-almacenamiento.md.
+create index ix_bookings_service_starts              on bookings (service_id, starts_at);
 create index ix_bookings_policy                      on bookings (policy_id);
 create index ix_bookings_session                     on bookings (session_id);
 create index ix_booking_resources_resource           on booking_resources (resource_id);
@@ -1128,6 +1229,24 @@ comment on column bookings.currency_id        is 'Moneda del precio pactado, la 
 comment on column bookings.session_id         is 'Individual: una por reserva. Grupal: compartida, y por eso comparten recurso';
 comment on column booking_resources.starts_at is 'Copia del rango de la reserva, mantenida por la FK compuesta con on update cascade';
 comment on column audit_log.app_user_id       is 'Usuario de la aplicación, tomado de set local app.user_id si la sesión lo informa';
+
+comment on function fn_clients_mayor_de_edad()                         is 'HU-001: el cliente tiene al menos 18 años al registrarse';
+comment on function fn_bookings_reglas()                               is 'HU-001, 002, 004: proveedor y servicio activos, cliente verificado para confirmar, cupo de la sesión';
+comment on function fn_bookings_coherencia()                           is 'La política es del proveedor del servicio; el precio en la moneda del servicio, que no cambia; los recursos siguen en la sede';
+comment on function fn_bookings_misma_sesion()                         is 'Las reservas de una misma sesión coinciden en servicio, sede y horario (al final de la transacción)';
+comment on function fn_service_locations_mismo_proveedor()             is 'El servicio y la sede son del mismo proveedor';
+comment on function fn_service_locations_quita_de_agendas()            is 'Si un servicio deja de prestarse en una sede, sale de las agendas de esa sede';
+comment on function fn_service_resource_requirements_mismo_proveedor() is 'El servicio y el tipo de recurso son del mismo proveedor';
+comment on function fn_resources_coherencia()                          is 'Tipo y sede del mismo proveedor; un recurso con reservas no cambia de sede';
+comment on function fn_proveedor_inmutable()                           is 'El proveedor de una sede, un servicio o un tipo de recurso no cambia';
+comment on function fn_agenda_services_en_sede()                       is 'El servicio se presta en la sede de la agenda (HU-006)';
+comment on function fn_agendas_servicios_en_sede()                     is 'Si la agenda cambia de sede, sus servicios se prestan en la nueva';
+comment on function fn_booking_resources_en_sede()                     is 'El recurso está en la sede de la reserva';
+comment on function fn_booking_reviews_completada()                    is 'Sólo se califica una reserva completada';
+comment on function fn_waitlist_entries_reserva()                      is 'La reserva en que terminó la espera es del mismo cliente, servicio y sede';
+comment on function fn_exige_motivo_cuenta()                           is 'HU-003: cambiar el estado de un proveedor exige el motivo en organization_status_changes';
+comment on function fn_auditar()                                       is 'Escribe en audit_log el antes y el después de cada cambio';
+comment on function fn_set_updated_at()                                is 'Mantiene updated_at';
 
 
 -- =====================================================================
@@ -1270,9 +1389,6 @@ end $$;
 --     excepción y fuera de un mantenimiento. Lo valida el backend al
 --     ofrecer franjas.
 --   · Que una excepción de agenda caiga dentro de la vigencia de la agenda.
---   · Las reglas de "mismo proveedor" se revisan al escribir la fila que
---     relaciona. Si después se cambia de proveedor una sede, un servicio
---     o un tipo de recurso, nada lo revisa de nuevo. El backend no lo hace.
 --   · fn_calcular_ocupacion sólo cuenta agendas propias del recurso; un
 --     recurso que sólo depende de la agenda de su sede queda con 0
 --     minutos disponibles. Tampoco descuenta mantenimientos.

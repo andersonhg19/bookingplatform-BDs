@@ -130,5 +130,5 @@ analyze;
 
 select relname, reltuples::bigint as tuplas, relpages as paginas, pg_size_pretty(pg_relation_size(oid)) as tamano
 from pg_class
-where relname in ('bookings', 'services', 'clients', 'bookings_pkey', 'ix_bookings_service')
+where relname in ('bookings', 'services', 'clients', 'pk_bookings', 'ix_bookings_service_starts')
 order by relname;

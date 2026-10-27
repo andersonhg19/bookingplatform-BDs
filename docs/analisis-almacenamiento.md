@@ -6,7 +6,8 @@ Este documento cubre los criterios 7, 8 y 9 de la rúbrica. Hago todos los cálc
 referencia del curso y después los comparo con lo que mide PostgreSQL. Para medir llené una base
 con el volumen estimado para el final del primer año usando
 [`generar-volumen.sql`](generar-volumen.sql), que usa una semilla fija para que los conteos se puedan
-reproducir.
+reproducir. Los `uuid` sí salen distintos en cada corrida, así que el tamaño exacto de un índice sobre
+`id` puede variar unas pocas páginas.
 
 | Dato | Valor |
 |---|---|
@@ -42,9 +43,13 @@ o una sede:
 | `uk_bookings_snapshot` | `id, session_id, starts_at, ends_at, status` | destino de la FK compuesta de `booking_resources` |
 | `ix_bookings_client_starts` | `client_id, starts_at desc` | historial de reservas de un cliente |
 | `ix_bookings_location_starts` | `location_id, starts_at` | agenda y ocupación de una sede |
-| `ix_bookings_service` | `service_id` | reportes por servicio; la consulta de la sección 4 |
+| `ix_bookings_service_starts` | `service_id, starts_at` | la FK por servicio (es el prefijo) y los reportes de un servicio en un rango de fechas, como la consulta de la sección 4 |
 | `ix_bookings_session` | `session_id` | el trigger de cupo suma los asistentes de una sesión |
 | `ix_bookings_policy` | `policy_id` | la FK hacia la política |
+
+El equipo tenía un índice sólo sobre `service_id`. Lo cambié por `(service_id, starts_at)`: sirve a
+lo mismo, porque `service_id` es su prefijo, y además deja que el filtro de fechas entre en la búsqueda.
+La sección 4 muestra lo que gana.
 
 No uso índices hash porque los árboles B también sirven para rangos de fechas. Tampoco uso BRIN: las
 fechas de reserva no llegan en orden, porque hoy se reserva para dentro de un mes.
@@ -129,7 +134,7 @@ Con las 1 584 000 reservas cargadas en orden aleatorio, como llegarían en produ
 | Páginas de `bookings` | 36 838 | 39 600 | +7,5 % |
 | Registros por página | 43 | 40 | |
 | Altura de `pk_bookings` | 3 | 3 (raíz en el nivel 2 de `bt_metap`) | igual |
-| Páginas de `pk_bookings` | ≤ 8 564 | 8 263 | dentro de la cota |
+| Páginas de `pk_bookings` | ≤ 8 564 | 8 393 | dentro de la cota |
 
 La tabla mide un 7,5 % más porque PostgreSQL le pone a cada tupla una cabecera de 23 bytes y a cada
 página una de 24, y la fórmula del curso no las cuenta. Con la fila real de 200 bytes que mide
@@ -183,7 +188,8 @@ order by ingresos desc;
 | Fracción del mes | 1/12 | reservas repartidas parejo en el año |
 | Fracción de estados | 0,75 | supuesto: 60 % `COMPLETED` + 15 % `CONFIRMED` |
 | HI de `uk_services_org_name` | 2 | entrada de 16 + 20 + 6 = 42 bytes → FR = 195, d = 98 → ⌈log₉₈ 5 440⌉ = ⌈1,88⌉ = 2 |
-| HI de `ix_bookings_service` | 3 | tiene una entrada por reserva, TR en total, igual que `pk_bookings` |
+| HI de `ix_bookings_service_starts` | 3 | entrada de 16 + 8 + 6 = 30 bytes → FR = 273, d = 137 → ⌈log₁₃₇ 1 584 000⌉ = ⌈2,90⌉ = 3. Medido: 3 niveles |
+| Reservas de un servicio en el mes | 292 × 1/12 = 24,3 ≈ 25 | S(service_id, bookings) por la fracción del mes |
 
 En la base de volumen, `pg_stats` da n_distinct(bookings.service_id) = 5 437 y, para
 `services.organization_id`, −0,125, que PostgreSQL usa para decir "una fracción de las filas":
@@ -207,18 +213,32 @@ servicios del proveedor. Los saco con el índice secundario `uk_services_org_nam
 Costo de obtener T = HI + S(organization_id, services) = 2 + 8 = 10 páginas
 
 Ese costo es el que cargo como BT. Las 8 tuplas caben en una página, pero producirlas cuesta 10
-lecturas. Después, por cada servicio, busco sus reservas en `ix_bookings_service`. La fórmula de
+lecturas. Después, por cada servicio, busco sus reservas en el índice de `bookings`. Supongo el peor
+caso: cada reserva en una página distinta, que es lo esperable porque las reservas de un servicio
+llegan revueltas con las demás. Hay dos variantes, según el índice:
+
+*B1. Con un índice sólo sobre `service_id`, el que tenía el equipo.* Cada búsqueda trae las 292
+reservas del servicio y el filtro de fechas se aplica después, sobre las tuplas leídas. La fórmula de
 referencia da:
 
 Costo = BT + TT × S(service_id, bookings) = 10 + 8 × 292 = **2 346 páginas**
 
-Supongo el peor caso: cada reserva en una página distinta, que es lo esperable porque las reservas de
-un servicio llegan revueltas con las demás. La fórmula no cuenta el descenso por el índice en cada
-búsqueda. Si lo sumo, cada búsqueda cuesta HI + S = 3 + 292:
+La fórmula no cuenta el descenso por el índice en cada búsqueda. Si lo sumo, cada búsqueda cuesta
+HI + S = 3 + 292:
 
 Costo = BT + TT × (HI + S) = 10 + 8 × (3 + 292) = **2 370 páginas**
 
-Los filtros de fecha y estado se aplican sobre las tuplas leídas.
+*B2. Con el índice `(service_id, starts_at)` de este esquema.* Dentro de las entradas de cada servicio,
+las fechas están ordenadas, así que la búsqueda es una selección por rango sobre el árbol B+. Con la
+fórmula de referencia, la fracción del rango es c = 1/12 (un mes de doce) y cada búsqueda cuesta
+HI + LB·c + S·c. Las entradas de un servicio caben en una hoja, así que LB·c es menos de una página y
+lo redondeo a 0:
+
+Costo por búsqueda = 3 + ⌈292 × 1/12⌉ = 3 + 25 = 28 páginas
+
+Costo = BT + TT × 28 = 10 + 8 × 28 = **234 páginas**
+
+En los dos casos el filtro de estado se aplica sobre las tuplas leídas.
 
 **C. Reunión por hash.** La relación con la que se arma la tabla hash son los 8 servicios ya filtrados,
 que ocupan una página y caben de sobra en las M − 2 páginas de memoria. Entonces es la variante en
@@ -238,20 +258,21 @@ Costo = BR + BS + 2·BR·2 + 2·BS·1 = 36 838 + 133 + 147 352 + 266 = **184 589
 | Alternativa | Costo calculado (páginas) | Medido en PostgreSQL |
 |---|---|---|
 | A. Ciclos anidados | 36 971 | |
-| **B. Ciclos anidados con índice** | **2 346** (2 370 con el descenso por el índice) | **2 338**, el plan que elige el optimizador |
+| B1. Ciclos anidados con índice sobre `service_id` | 2 370 | 2 339, con ese índice creado para medir |
+| **B2. Ciclos anidados con índice `(service_id, starts_at)`** | **234** | **226**, el plan que elige el optimizador |
 | C. Hash, en memoria | 36 848 | 39 613, forzado con `enable_nestloop = off` |
 | D. Ordenamiento y mezcla | 184 589 | |
 
-B es unas 16 veces más barata que A o C porque sólo lee las reservas de 8 servicios de 5 440. A y C
-leen la tabla entera para quedarse con 146 filas. El `EXPLAIN (ANALYZE, BUFFERS)` de B lo confirma:
-10 páginas de `services`, 24 del índice (8 búsquedas × 3 niveles) y 2 304 de `bookings`. La medición
-de C da más que el cálculo porque la tabla real tiene 39 600 páginas y no 36 838 (sección 3.4).
+B2 es unas 160 veces más barata que A o C, y diez veces más barata que B1. A y C leen la tabla entera
+para quedarse con 146 filas. B1 sólo lee las reservas de 8 servicios de 5 440, pero de todo el año.
+B2 lee sólo las del mes. El `EXPLAIN (ANALYZE, BUFFERS)` de B2 lo confirma: 10 páginas de `services`,
+25 del índice y 191 de `bookings`. La medición de C da más que el cálculo porque la tabla real tiene
+39 600 páginas y no 36 838 (sección 3.4).
 
-**Lo que dejaría todavía más barata la consulta.** Con un índice `(service_id, starts_at)`, el filtro
-de fecha entraría en la búsqueda del índice y sólo se leerían las reservas del mes. Lo probé: baja de
-2 338 a **226 páginas**, a cambio de 61 MB más de índice. Ese índice haría redundante a
-`ix_bookings_service`, que es del equipo, así que lo dejo como propuesta para cambiarlos juntos y no
-lo agrego por mi cuenta.
+**Lo que cuesta el índice compuesto.** Mide 76 MB, frente a los 15 MB del de una sola columna. Como lo
+reemplaza, cada reserva nueva sigue actualizando un solo índice por servicio. Pagar 61 MB por leer
+diez veces menos en todos los reportes por servicio y fecha me parece un buen negocio, y por eso lo
+dejé en el esquema.
 
 ## 5. Optimización algebraica
 
@@ -306,8 +327,10 @@ atributos de B, así que cada una baja a su relación. p₁ usa las dos y se que
 Ģ ( σ p₃ ∧ p₄ (B)  θ p₁  σ p₂ (S) )
 ```
 
-**Paso 4. Una proyección debajo del agrupamiento.** El agrupamiento sólo lee `s_name` y `total_price`,
-así que puedo proyectar antes sin cambiar el resultado. Hay un cuidado: π elimina tuplas repetidas, y
+**Paso 4. Una proyección debajo del agrupamiento.** Este paso no es una de las leyes de la tabla de
+referencia, que no tratan el agrupamiento. Se apoya en cómo está definido Ģ: el resultado sólo depende
+de los atributos de agrupamiento (`s_name`) y de los que agrega (`total_price`), así que puedo
+proyectar antes sin cambiar el resultado. Hay un cuidado: π elimina tuplas repetidas, y
 dos reservas del mismo servicio con el mismo precio quedarían en una sola, con lo que `COUNT(*)` y
 `SUM` darían mal. Para no perderlas conservo la clave `id` de la reserva.
 
@@ -370,6 +393,7 @@ que suba por el árbol.
 
 En la base de volumen, σ p₃ ∧ p₄ (B) da 101 225 tuplas y la reunión 151. Había estimado 99 000 y 146.
 
-El plan que ejecuta PostgreSQL, el B de la sección 4.3, es la forma física de E₁ con una diferencia:
-no materializa σ p₃ ∧ p₄ (B) entera. Usa el índice sobre `service_id` para traer sólo las reservas de
-los 8 servicios y les aplica p₃ ∧ p₄ al leerlas.
+El plan que ejecuta PostgreSQL, el B2 de la sección 4.3, es la forma física de E₁. No materializa
+σ p₃ ∧ p₄ (B) entera: usa el índice `(service_id, starts_at)` para aplicar p₃ dentro de la búsqueda de
+cada uno de los 8 servicios, y p₄ al leer las tuplas. Es decir, hace la restricción antes de la
+reunión, que es justo lo que pide la heurística.

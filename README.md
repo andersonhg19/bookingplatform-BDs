@@ -14,7 +14,7 @@ La entrega del Sprint 1 está intacta en [`sprint-1/`](sprint-1/) y en la etique
 | [`schema.sql`](schema.sql) | Modelo físico completo: 30 tablas normalizadas, restricciones, índices, triggers, roles y RLS |
 | [`seed.sql`](seed.sql) | Datos de prueba, pensados para que todas las consultas devuelvan filas |
 | [`consultas.sql`](consultas.sql) | Las 24 preguntas clave: 14 del Sprint 1 y 10 del Sprint 2 |
-| [`pruebas-integridad.sql`](pruebas-integridad.sql) | 34 violaciones de datos y de permisos que la base rechaza |
+| [`pruebas-integridad.sql`](pruebas-integridad.sql) | 41 violaciones de datos y de permisos que la base rechaza |
 | [`docs/analisis-almacenamiento.md`](docs/analisis-almacenamiento.md) | Almacenamiento, índices, costo de una consulta y su optimización |
 | [`docs/generar-volumen.sql`](docs/generar-volumen.sql) | Carga 1,58 millones de reservas para comprobar el análisis |
 | [`docker-compose.yml`](docker-compose.yml) | PostgreSQL 16 y pgAdmin con todo cargado |
@@ -74,9 +74,11 @@ triggers cortos. Detalle en [Normalización](#normalización).
 | `account_status_changes` | una tabla para clientes y proveedores, con un tipo y dos FK de las que siempre una era nula | `organization_status_changes` y `client_status_changes` |
 | `clients` | `city` como texto libre: "Medellin" y "Medellín" eran dos ciudades | `city_id`, FK al catálogo `cities` |
 | `clients`, `login_attempts` | fechas `timestamp` sin zona horaria | `timestamptz`, como el resto del esquema |
-| `clients` | la mayoría de edad en un `CHECK` con `current_date`, que no es inmutable y rompe un restore | un trigger que la revisa al escribir |
+| `clients` | la mayoría de edad en un `CHECK` con `current_date`: PostgreSQL da por hecho que un `CHECK` es inmutable, y ese no lo es | un trigger que la revisa al registrar |
 | `bookings` | el precio pactado sin moneda | `currency_id`: el precio se congela con su moneda |
 | `booking_resources` | la FK que sincroniza la copia no incluía `session_id` | la incluye |
+| `bookings` | nada obligaba a que las reservas de una sesión grupal tuvieran el mismo servicio y horario | un trigger lo exige al cerrar la transacción |
+| `bookings` | índice sólo sobre `service_id` | `(service_id, starts_at)`: el reporte por servicio y mes lee diez veces menos páginas |
 | `organization_members`, `service_resource_requirements` | `id` sustituto más una `UNIQUE` con la clave real | la clave real es la PK |
 | Todas | nombres de restricción mezclados (`ck_bsc_`, `<tabla>_pkey`) | un solo patrón: `pk_`, `fk_`, `uk_`, `ck_`, `ex_`, `ix_`, `ux_` + tabla |
 
@@ -350,7 +352,7 @@ erDiagram
     bookings ||--o| booking_reviews : "se califica"
     clients ||--o{ waitlist_entries : espera
     service_locations ||--o{ waitlist_entries : "tiene espera"
-    bookings |o--o{ waitlist_entries : "sale de"
+    bookings |o--o| waitlist_entries : "sale de"
     bookings ||--o{ payments : "se paga con"
     currencies ||--o{ payments : "cobrado en"
 
@@ -413,7 +415,7 @@ erDiagram
         date desired_date
         int attendees
         varchar status "WAITING, NOTIFIED, BOOKED, EXPIRED, CANCELLED"
-        uuid booking_id FK "sólo si BOOKED"
+        uuid booking_id FK, UK "sólo si BOOKED"
         timestamptz notified_at
     }
     payments {
@@ -457,8 +459,15 @@ restricciones (`::text`, `= ANY (ARRAY[...])`) para que se lean como en el `sche
 trae sus columnas con tipo, nulo, default y clave, y debajo las restricciones que abarcan varias
 columnas, los `CHECK` y los `EXCLUDE`.
 
+Debajo de cada tabla también van los triggers que aplican sus reglas, porque varias de ellas
+reemplazan a restricciones declarativas (ver [Normalización](#normalización)). No repito en cada
+tabla los dos triggers genéricos: `fn_set_updated_at`, que mantiene `updated_at`, y `fn_auditar`, que
+escribe en `audit_log` los cambios de `clients`, `organizations`, `organization_members`,
+`organization_policies`, `services`, `payments` y `booking_reviews`.
+
 Todas las restricciones e índices siguen el mismo patrón: `pk_`, `fk_`, `uk_`, `ck_`, `ex_`
-(exclusión), `ix_` y `ux_` (índice único), seguidos del nombre de la tabla y de lo que controlan.
+(exclusión), `ix_` y `ux_` (índice único), seguidos del nombre de la tabla y de lo que controlan. Los
+triggers empiezan por `tg_` y sus funciones por `fn_`.
 
 <details>
 <summary><b>Catálogos</b> · cities, organization_categories, currencies</summary>
@@ -537,6 +546,7 @@ Perfil del cliente (HU-001); id = auth.users.id de Supabase.
 - CHECK `ck_clients_phone`: `CHECK ((phone ~ '^\+?[0-9]{7,15}$'))`
 - CHECK `ck_clients_status`: `CHECK ((status IN ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED')))`
 - UNIQUE (índice) `ux_clients_email_lower`: `USING btree (lower(email))`
+- Trigger `tg_clients_mayor_de_edad`: HU-001: el cliente tiene al menos 18 años al registrarse
 
 
 #### `login_attempts`
@@ -589,6 +599,7 @@ Negocio proveedor (HU-002). PENDING_APPROVAL hasta que un administrador lo aprue
 - CHECK `ck_organizations_name`: `CHECK ((length(btrim(name)) > 0))`
 - CHECK `ck_organizations_phone`: `CHECK ((contact_phone ~ '^\+?[0-9]{7,15}$'))`
 - CHECK `ck_organizations_status`: `CHECK ((status IN ('PENDING_APPROVAL', 'ACTIVE', 'SUSPENDED', 'REJECTED')))`
+- Trigger `tg_organizations_motivo`: HU-003: cambiar el estado de un proveedor exige el motivo en organization_status_changes
 
 
 #### `organization_members`
@@ -652,6 +663,7 @@ Sedes de un proveedor.
 - CHECK `ck_locations_address`: `CHECK ((length(btrim(address)) > 0))`
 - CHECK `ck_locations_name`: `CHECK ((length(btrim(name)) > 0))`
 - CHECK `ck_locations_status`: `CHECK ((status IN ('ACTIVE', 'INACTIVE')))`
+- Trigger `tg_locations_proveedor_inmutable`: El proveedor de una sede, un servicio o un tipo de recurso no cambia
 
 
 #### `organization_status_changes`
@@ -732,6 +744,7 @@ Servicios ofertados (HU-004). customer_capacity 1 = individual, > 1 = grupal.
 - CHECK `ck_services_prep`: `CHECK (((preparation_minutes >= 0) AND (cleanup_minutes >= 0)))`
 - CHECK `ck_services_price`: `CHECK ((price >= (0)))`
 - CHECK `ck_services_status`: `CHECK ((status IN ('ACTIVE', 'INACTIVE')))`
+- Trigger `tg_services_proveedor_inmutable`: El proveedor de una sede, un servicio o un tipo de recurso no cambia
 
 
 #### `service_locations`
@@ -746,6 +759,8 @@ En qué sedes se presta cada servicio (HU-004).
 | `location_id` | `uuid` | no |  | PK, FK → `locations` |
 
 - PK `pk_service_locations`: `PRIMARY KEY (service_id, location_id)`
+- Trigger `tg_service_locations_mismo_proveedor`: El servicio y la sede son del mismo proveedor
+- Trigger `tg_service_locations_quita_de_agendas`: Si un servicio deja de prestarse en una sede, sale de las agendas de esa sede
 
 
 #### `resource_types`
@@ -762,6 +777,7 @@ Tipos de recurso no consumible: sala, silla, especialista.
 
 - UNIQUE `uk_resource_types_org_name`: `UNIQUE (organization_id, name)`
 - CHECK `ck_resource_types_name`: `CHECK ((length(btrim(name)) > 0))`
+- Trigger `tg_resource_types_proveedor_inmutable`: El proveedor de una sede, un servicio o un tipo de recurso no cambia
 
 
 #### `service_resource_requirements`
@@ -778,6 +794,7 @@ Cuántos recursos de cada tipo exige un servicio.
 
 - PK `pk_service_resource_requirements`: `PRIMARY KEY (service_id, resource_type_id)`
 - CHECK `ck_service_resource_requirements_qty`: `CHECK ((quantity_required > 0))`
+- Trigger `tg_service_resource_requirements_mismo_proveedor`: El servicio y el tipo de recurso son del mismo proveedor
 
 
 #### `resources`
@@ -802,6 +819,7 @@ Recurso concreto en una sede, con capacidad y estado (HU-009).
 - CHECK `ck_resources_capacity`: `CHECK ((capacity >= 1))`
 - CHECK `ck_resources_name`: `CHECK ((length(btrim(name)) > 0))`
 - CHECK `ck_resources_status`: `CHECK ((status IN ('ACTIVE', 'RETIRED')))`
+- Trigger `tg_resources_coherencia`: Tipo y sede del mismo proveedor; un recurso con reservas no cambia de sede
 
 
 #### `resource_maintenances`
@@ -852,6 +870,7 @@ Agenda de una sede o de un recurso: granularidad, vigencia y servicios (HU-006).
 - CHECK `ck_agendas_name`: `CHECK ((length(btrim(name)) > 0))`
 - CHECK `ck_agendas_slot`: `CHECK ((slot_minutes IN (15, 30, 60)))`
 - CHECK `ck_agendas_vigencia`: `CHECK (((valid_until IS NULL) OR (valid_until >= valid_from)))`
+- Trigger `tg_agendas_servicios_en_sede`: Si la agenda cambia de sede, sus servicios se prestan en la nueva
 
 
 #### `agenda_services`
@@ -866,6 +885,7 @@ Servicios reservables en una agenda (HU-006).
 | `service_id` | `uuid` | no |  | PK, FK → `services` |
 
 - PK `pk_agenda_services`: `PRIMARY KEY (agenda_id, service_id)`
+- Trigger `tg_agenda_services_en_sede`: El servicio se presta en la sede de la agenda (HU-006)
 
 
 #### `schedules`
@@ -944,6 +964,9 @@ Reserva. policy_id y currency_id congelan las condiciones y la moneda al crearla
 - CHECK `ck_bookings_price`: `CHECK ((total_price >= (0)))`
 - CHECK `ck_bookings_rango`: `CHECK ((ends_at > starts_at))`
 - CHECK `ck_bookings_status`: `CHECK ((status IN ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW')))`
+- Trigger `tg_bookings_coherencia`: La política es del proveedor del servicio; el precio en la moneda del servicio, que no cambia; los recursos siguen en la sede
+- Trigger `tg_bookings_misma_sesion`: Las reservas de una misma sesión coinciden en servicio, sede y horario (al final de la transacción)
+- Trigger `tg_bookings_reglas`: HU-001, 002, 004: proveedor y servicio activos, cliente verificado para confirmar, cupo de la sesión
 
 
 #### `booking_resources`
@@ -964,6 +987,7 @@ Recursos ocupados por una reserva; el EXCLUDE impide la sobreocupación.
 - EXCLUDE `ex_booking_resources_solape`: `EXCLUDE USING gist (resource_id WITH =, session_id WITH <>, tstzrange(starts_at, ends_at) WITH &&) WHERE ((status IN ('RESERVED', 'CONFIRMED')))`
 - PK `pk_booking_resources`: `PRIMARY KEY (booking_id, resource_id)`
 - FK `fk_booking_resources_booking`: `FOREIGN KEY (booking_id, session_id, starts_at, ends_at, status) REFERENCES bookings(id, session_id, starts_at, ends_at, status) ON UPDATE CASCADE ON DELETE CASCADE`
+- Trigger `tg_booking_resources_en_sede`: El recurso está en la sede de la reserva
 
 
 #### `booking_status_changes`
@@ -1001,6 +1025,7 @@ Calificación de 1 a 5 de una reserva completada.
 
 - CHECK `ck_booking_reviews_comment`: `CHECK (((comment IS NULL) OR (length(btrim(comment)) > 0)))`
 - CHECK `ck_booking_reviews_rating`: `CHECK (((rating >= 1) AND (rating <= 5)))`
+- Trigger `tg_booking_reviews_completada`: Sólo se califica una reserva completada
 
 
 #### `waitlist_entries` · **[S2 nueva]**
@@ -1016,7 +1041,7 @@ Lista de espera por servicio, sede y día.
 | `desired_date` | `date` | no |  |  |
 | `attendees` | `integer` | no | `1` |  |
 | `status` | `varchar(20)` | no | `'WAITING'` |  |
-| `booking_id` | `uuid` | sí |  | FK → `bookings` |
+| `booking_id` | `uuid` | sí |  | FK → `bookings`, UNIQUE |
 | `notified_at` | `timestamptz` | sí |  |  |
 | `created_at` | `timestamptz` | no | `now()` |  |
 | `updated_at` | `timestamptz` | no | `now()` |  |
@@ -1024,9 +1049,10 @@ Lista de espera por servicio, sede y día.
 - FK `fk_waitlist_entries_service_location`: `FOREIGN KEY (service_id, location_id) REFERENCES service_locations(service_id, location_id) ON DELETE CASCADE`
 - CHECK `ck_waitlist_entries_attendees`: `CHECK ((attendees > 0))`
 - CHECK `ck_waitlist_entries_booked`: `CHECK (((status = 'BOOKED') = (booking_id IS NOT NULL)))`
-- CHECK `ck_waitlist_entries_notified`: `CHECK (((status <> ALL ((ARRAY['NOTIFIED', 'BOOKED', 'EXPIRED']))) OR (notified_at IS NOT NULL)))`
+- CHECK `ck_waitlist_entries_notified`: `CHECK ((((status) NOT IN ('NOTIFIED', 'BOOKED', 'EXPIRED')) OR (notified_at IS NOT NULL)))`
 - CHECK `ck_waitlist_entries_status`: `CHECK ((status IN ('WAITING', 'NOTIFIED', 'BOOKED', 'EXPIRED', 'CANCELLED')))`
 - UNIQUE (índice) `ux_waitlist_entries_activa`: `USING btree (client_id, service_id, location_id, desired_date) WHERE (status IN ('WAITING', 'NOTIFIED'))`
+- Trigger `tg_waitlist_entries_reserva`: La reserva en que terminó la espera es del mismo cliente, servicio y sede
 
 
 #### `payments` · **[S2 nueva]**
@@ -1119,38 +1145,41 @@ Auditoría de cambios en tablas sensibles, escrita por trigger.
 
 ### Normalización
 
-**28 de las 30 tablas están en BCNF.** Las otras dos se quedan por debajo a propósito, y por la
-misma razón: un `EXCLUDE` de PostgreSQL sólo compara columnas de la misma fila, así que el dato que
-necesita tiene que estar ahí.
+**26 de las 30 tablas están en BCNF.** Las otras cuatro se quedan por debajo a propósito, y cada una
+tiene su razón:
 
-| Tabla | Dependencia que queda | Por qué se deja |
-|---|---|---|
-| `booking_resources` | `booking_id → session_id, starts_at, ends_at, status`: parcial respecto a la PK `(booking_id, resource_id)`, rompe 2FN | El `EXCLUDE` que impide que un recurso atienda dos sesiones a la vez necesita el rango en la fila. La FK compuesta contra `uk_bookings_snapshot`, con `on update cascade`, hace que la copia no pueda desviarse del original |
-| `agendas` | `resource_id → location_id`, cuando la agenda es de un recurso. `resource_id` no es superclave, así que rompe BCNF; sigue en 3FN porque `location_id` es parte de la clave candidata `(location_id, name)` | El `EXCLUDE` que impide dos agendas vigentes en la misma sede necesita `location_id`. La FK compuesta `(resource_id, location_id)` contra `resources` impide que no coincida |
+| Tabla | Dependencia que queda | Forma | Por qué se deja, y qué evita la anomalía |
+|---|---|---|---|
+| `agendas` | `resource_id → location_id`, cuando la agenda es de un recurso | 3FN | `resource_id` no es superclave, así que rompe BCNF. Sigue en 3FN porque `location_id` es parte de la clave candidata `(location_id, name)`. El `EXCLUDE` que impide dos agendas vigentes en la misma sede necesita `location_id` en la fila, y la FK compuesta `(resource_id, location_id)` contra `resources` impide que no coincida |
+| `bookings` | `session_id → service_id, location_id, starts_at, ends_at`, en los servicios grupales | 2FN | Es transitiva: `id → session_id → starts_at`. Lo correcto de libro sería una tabla `sessions`, pero obliga a rehacer el flujo de reservas del backend, así que la dejo como siguiente paso. Mientras tanto, `tg_bookings_misma_sesion` exige al cerrar cada transacción que las reservas de una sesión coincidan en servicio, sede y horario |
+| `booking_resources` | `booking_id → session_id, starts_at, ends_at, status`, parcial respecto a la PK `(booking_id, resource_id)` | 1FN | El `EXCLUDE` que impide que un recurso atienda dos sesiones a la vez necesita el rango en la fila. La FK compuesta contra `uk_bookings_snapshot`, con `on update cascade`, hace que la copia no pueda desviarse del original |
+| `audit_log` | `old_data` y `new_data` son `jsonb`, que no es atómico | no está en 1FN | Guardan la foto de una fila de cualquier tabla. Una columna por cada columna de cada tabla auditada no tendría sentido, y nadie consulta el negocio desde ahí, sólo quién cambió qué |
 
-Así que `agendas` queda en 3FN y `booking_resources` en 1FN. La segunda es una desnormalización
-controlada: la redundancia existe, pero el motor no deja que produzca una anomalía de actualización.
-Es la misma decisión del Sprint 1, ahora reducida al mínimo: antes la tabla también repetía
-`location_id`.
+Las tres primeras tienen la misma causa: un `EXCLUDE` de PostgreSQL, o una regla de la sesión, sólo
+puede comparar columnas de la misma fila, así que el dato tiene que estar ahí. En las tres el motor
+mantiene la copia igual al original, con una FK compuesta o con un trigger.
 
-**Lo que quité y cómo se garantiza ahora.** En el Sprint 1 había cinco redundancias más. Todas
-existían para lo mismo, impedir que se mezclaran datos de dos proveedores, y las quité:
+**Lo que quité y cómo se garantiza ahora.** Había siete redundancias más: cuatro del Sprint 1 y tres
+que llegaron con V7 y V8. Todas existían para lo mismo, impedir que se mezclaran datos de dos
+proveedores o de dos sedes, y las quité:
 
 | Tabla | Dependencia que rompía la forma normal | La regla ahora la cumple |
 |---|---|---|
 | `service_locations` | `service_id → organization_id`: parcial, 2FN | `tg_service_locations_mismo_proveedor` |
 | `service_resource_requirements` | `service_id → organization_id`: parcial, 2FN | `tg_service_resource_requirements_mismo_proveedor` |
-| `agenda_services` | `agenda_id → location_id`: parcial, 2FN | `tg_agenda_services_en_sede` |
-| `resources` | `location_id → organization_id`: transitiva, 3FN | `tg_resources_mismo_proveedor` |
+| `agenda_services` | `agenda_id → location_id`: parcial, 2FN | `tg_agenda_services_en_sede` y `tg_agendas_servicios_en_sede` |
+| `resources` | `location_id → organization_id`: transitiva, 3FN | `tg_resources_coherencia` |
 | `agendas` | `location_id → organization_id`: transitiva, 3FN | sale de la sede; no hace falta regla |
 | `bookings` | `service_id → organization_id`: transitiva, 3FN | `tg_bookings_coherencia` (la política es del proveedor del servicio) |
-| `booking_resources` | `resource_id → location_id`: parcial, 2FN | `tg_booking_resources_en_sede` |
+| `booking_resources` | `resource_id → location_id`: parcial, 2FN | `tg_booking_resources_en_sede` y `tg_bookings_coherencia` |
 
-Es un intercambio y lo hice a conciencia. Una FK compuesta es declarativa y no se puede saltar; un
-trigger es código. A cambio, el modelo queda en la forma que pide el curso, cada dato vive en un solo
-lugar, y cada trigger es una consulta de una línea. Las pruebas 18 a 24 de
-[`pruebas-integridad.sql`](pruebas-integridad.sql) intentan romper cada regla, y la base las rechaza
-todas.
+Es un intercambio: una FK compuesta es declarativa y no se puede saltar, y un trigger es código. A
+cambio, cada dato vive en un solo lugar y cada trigger es una sola consulta. Para que las reglas
+tampoco se puedan romper desde la tabla padre, el proveedor de una sede, un servicio o un tipo de
+recurso no se puede cambiar (`fn_proveedor_inmutable`), un recurso con reservas no se cambia de sede,
+y una reserva no se mueve a una sede donde no están sus recursos. Las pruebas 20 a 33 de
+[`pruebas-integridad.sql`](pruebas-integridad.sql) intentan romper cada regla, de frente y desde la
+tabla padre, y la base las rechaza todas.
 
 **Las tablas nuevas:**
 
@@ -1158,20 +1187,15 @@ todas.
 |---|---|---|---|
 | `agenda_exceptions` | `id → agenda_id, exception_date, start_time, end_time, reason` | BCNF | El único determinante es la clave |
 | `booking_reviews` | `id → todo`; `booking_id → todo` | BCNF | Las dos son claves candidatas. No guarda cliente ni servicio: saldrían de `booking_id` y serían transitivas |
-| `waitlist_entries` | `id → todo` | BCNF | No guarda `organization_id`: `service_id → organization_id` la haría transitiva |
+| `waitlist_entries` | `id → todo`; `booking_id → todo`, cuando no es nulo | BCNF | `booking_id` es `UNIQUE`: una reserva sale de a lo sumo una espera. No guarda `organization_id`, que saldría del servicio. El cliente, el servicio y la sede de la espera coinciden con los de su reserva, y eso lo exige `tg_waitlist_entries_reserva` |
 | `payments` | `id → todo`; `external_reference → todo` | BCNF | `amount` y `currency_id` no se derivan de la reserva: son lo que cobró la pasarela, y una tarjeta internacional se cobra en otra moneda |
 | `resource_occupancy_daily` | `(resource_id, occupancy_date) → minutos, reservas` | BCNF | Todo depende de la clave completa |
-| `audit_log` | `id → todo` | no está en 1FN, a propósito | Ver abajo |
+| `audit_log` | `id → todo` | no está en 1FN | Arriba, en las excepciones |
 
-Dos decisiones más:
-
-- `resource_occupancy_daily` es un dato derivado: se podría calcular desde las reservas y las agendas.
-  La guardo igual, como en un data mart, porque el reporte de un mes por recurso pasa de recorrer
-  todas las reservas a leer 30 filas. La llena `fn_calcular_ocupacion`, que reescribe el día
-  completo, y rol_app sólo tiene permiso de leerla.
-- `audit_log.old_data` y `new_data` son `jsonb`, que no es atómico. Guardan la foto de una fila de
-  cualquier tabla, y una columna por cada columna de cada tabla auditada no tendría sentido. Nadie
-  consulta el negocio desde ahí, sólo quién cambió qué.
+`resource_occupancy_daily` además es un dato derivado: se podría calcular desde las reservas y las
+agendas. La guardo igual, como en un data mart, porque el reporte de un mes por recurso pasa de
+recorrer todas las reservas a leer 30 filas. La llena `fn_calcular_ocupacion`, que reescribe el día
+completo, y rol_app sólo tiene permiso de leerla.
 
 Los estados (`status`, `role`, `method`) son `varchar` con `CHECK` y no tablas de catálogo. Son listas
 cerradas que cambian con el código y no con los datos, así que una tabla aparte sólo agregaría un join.
@@ -1185,12 +1209,12 @@ decisión de normalización está comentada donde se toma.
 
 Lo probé así:
 
-- Contra un PostgreSQL 16 vacío corre sin errores y crea 30 tablas, 38 FK, 78 CHECK, 6 EXCLUDE,
-  84 índices y 28 triggers, con RLS activo en todas.
+- Contra un PostgreSQL 16 vacío corre sin errores y crea 30 tablas, 38 FK, 78 CHECK, 18 UNIQUE,
+  6 EXCLUDE, 85 índices y 34 triggers, con RLS activo en todas.
 - Ninguna restricción ni índice se sale de la convención de nombres. Lo verifiqué contra el catálogo.
 - Contra una base con los roles de Supabase (`anon`, `authenticated` y `auth.uid()`) crea además las
   políticas del Data API.
-- `seed.sql`, las 24 consultas y las 34 pruebas de integridad corren encima. Cada prueba falla por la
+- `seed.sql`, las 24 consultas y las 41 pruebas de integridad corren encima. Cada prueba falla por la
   regla que le corresponde, y la parte de lo permitido pasa sin errores.
 - `docker compose up` deja el contenedor `healthy` con todo cargado.
 
@@ -1413,10 +1437,10 @@ Flyway seguiría migrando con el usuario dueño (`spring.flyway.user`) y la apli
 
 ### Comprobado
 
-Las pruebas 27 a 34 de [`pruebas-integridad.sql`](pruebas-integridad.sql) intentan lo que cada rol
+Las pruebas 34 a 41 de [`pruebas-integridad.sql`](pruebas-integridad.sql) intentan lo que cada rol
 *no* debe poder hacer, y todas terminan en `permission denied`. La parte 3 hace con rol_app lo que hace
-el backend (reservar, asignar un recurso, confirmar, pagar, editar un servicio y reescribir una
-agenda) y todo pasa, triggers incluidos. También corre con rol_lectura un reporte de calificaciones.
+el backend (reservar, asignar un recurso, confirmar, pagar, editar un servicio y reescribir los
+bloques de una agenda) y todo pasa, triggers incluidos. También corre con rol_lectura un reporte de calificaciones.
 Las políticas de Supabase las probé con un `auth.uid()` simulado: un cliente ve sólo sus reservas y no
 puede leer `clients` ni crear pagos.
 
@@ -1426,9 +1450,10 @@ Está en [`docs/analisis-almacenamiento.md`](docs/analisis-almacenamiento.md). E
 
 - **Tabla analizada:** `bookings`. L = 183 bytes, FR = 43, BR = 36 838 páginas (288 MB). El índice
   `pk_bookings` tiene orden d = 186, altura 3 y como máximo 8 564 nodos (67 MB). PostgreSQL mide
-  39 600 páginas y un índice de altura 3 con 8 263 páginas.
-- **Costo:** para la consulta 24, el ciclo anidado con índice cuesta 2 370 páginas frente a 36 848 del
-  hash join y 184 589 del ordenamiento y mezcla. El plan real lee 2 338.
+  39 600 páginas y un índice de altura 3 con 8 393 páginas.
+- **Costo:** para la consulta 24, el ciclo anidado con el índice `(service_id, starts_at)` cuesta
+  234 páginas, frente a 2 370 con el índice de una sola columna que tenía el equipo, 36 848 del hash
+  join y 184 589 del ordenamiento y mezcla. El plan real lee 226. Por eso cambié el índice.
 - **Optimización:** de E₀, con un producto de 8 600 millones de tuplas, a E₁, que filtra y proyecta
   antes de la reunión con las leyes 2, 4/5, 9, 3, 8 y 11, y sólo combina 8 servicios con 99 000
   reservas para quedarse con 146.
