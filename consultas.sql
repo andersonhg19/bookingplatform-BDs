@@ -9,9 +9,9 @@
 --  SQL de Supabase:
 --      psql -d reservas -f consultas.sql
 --
---  Las del Sprint 1 son las mismas de esa entrega, ajustadas por el equipo
---  a sus migraciones: la 5 usa identification_number (V4) y la 6 lee los
---  bloques desde la agenda (V8).
+--  Las del Sprint 1 son las mismas de esa entrega, ajustadas al modelo
+--  actual: la 5 usa identification_number, la 6 lee los bloques desde la
+--  agenda, y la 9 y la 12 sacan la ciudad del catálogo.
 -- =====================================================================
 
 
@@ -170,7 +170,7 @@ select email,
        count(*) >= 5     as bloqueada
 from login_attempts
 where success = false
-  and attempted_at > localtimestamp - interval '15 minutes'
+  and attempted_at > now() - interval '15 minutes'
 group by email
 order by fallos_recientes desc;
 
@@ -178,16 +178,17 @@ order by fallos_recientes desc;
 -- 9. ¿Qué clientes llevan más de 24 horas sin verificar el correo? Es la
 --    lista a la que hay que reenviarles el enlace (HU-001).
 \echo '=== 9. Clientes sin verificar hace más de 24 h ==='
-select id,
-       full_name,
-       email,
-       city,
-       created_at,
-       localtimestamp - created_at as lleva_esperando
-from clients
-where status = 'PENDING_VERIFICATION'
-  and created_at < localtimestamp - interval '24 hours'
-order by created_at;
+select c.id,
+       c.full_name,
+       c.email,
+       ci.name               as ciudad,
+       c.created_at,
+       now() - c.created_at  as lleva_esperando
+from clients c
+    inner join cities ci on ci.id = c.city_id
+where c.status = 'PENDING_VERIFICATION'
+  and c.created_at < now() - interval '24 hours'
+order by c.created_at;
 
 
 -- 10. ¿Qué condiciones de cancelación rigen para cada reserva? Como cada
@@ -221,8 +222,9 @@ select exists (select 1 from clients       where lower(email) = lower('laura@exa
 -- 12. ¿Qué clientes se registraron y nunca han reservado? Subconsulta
 --     correlacionada con el operador de existencia.
 \echo '=== 12. Clientes que nunca han reservado ==='
-select c.id, c.full_name, c.email, c.city, c.status
+select c.id, c.full_name, c.email, ci.name as ciudad, c.status
 from   clients c
+       inner join cities ci on ci.id = c.city_id
 where  not exists (select 1
                    from   bookings b
                    where  b.client_id = c.id)
@@ -332,16 +334,18 @@ order by servicio, sede, dia, turno;
 --     pendientes no cuentan. Une los dos movimientos con union all.
 \echo '=== 18. Cobrado, devuelto y neto por proveedor y mes ==='
 with movimientos as (
-    select b.organization_id, p.currency_id,
+    select s.organization_id, p.currency_id,
            date_trunc('month', p.paid_at) as mes, p.amount as cobrado, 0 as devuelto
     from payments p
         inner join bookings b on b.id = p.booking_id
+        inner join services s on s.id = b.service_id
     where p.status in ('PAID', 'REFUNDED')
     union all
-    select b.organization_id, p.currency_id,
+    select s.organization_id, p.currency_id,
            date_trunc('month', p.refunded_at), 0, p.amount
     from payments p
         inner join bookings b on b.id = p.booking_id
+        inner join services s on s.id = b.service_id
     where p.status = 'REFUNDED'
 )
 select o.name                          as organizacion,

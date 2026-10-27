@@ -110,53 +110,109 @@ values ('44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-0000000
 
 
 \echo ''
+\echo '#####################  Las reglas que reemplazan a las FK compuestas  #####################'
+
+\echo ''
+\echo '--- 18. Publicar un servicio de la clínica en una sede de la barbería ---'
+insert into service_locations (service_id, location_id)
+values ('aaaa0000-0000-0000-0000-000000000004', '88888888-0000-0000-0000-000000000001');
+
+\echo ''
+\echo '--- 19. Exigir para un servicio un tipo de recurso de otro proveedor ---'
+insert into service_resource_requirements (service_id, resource_type_id)
+values ('aaaa0000-0000-0000-0000-000000000001', 'bbbb0000-0000-0000-0000-000000000003');
+
+\echo ''
+\echo '--- 20. Poner una unidad dental de la clínica en una sede de la barbería ---'
+insert into resources (resource_type_id, location_id, name)
+values ('bbbb0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', 'Unidad prestada');
+
+\echo ''
+\echo '--- 21. Habilitar en una agenda un servicio que no se presta en su sede ---'
+insert into agenda_services (agenda_id, service_id)
+select id, 'aaaa0000-0000-0000-0000-000000000002' from agendas where resource_id = 'cccc0000-0000-0000-0000-000000000006';
+
+\echo ''
+\echo '--- 22. Reservar en la barbería con la política de la clínica ---'
+insert into bookings (client_id, service_id, location_id, policy_id, session_id, starts_at, ends_at, total_price, currency_id)
+values ('44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000001',
+        '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000003', gen_random_uuid(),
+        now() + interval '12 days', now() + interval '12 days' + interval '30 minutes',
+        35000, '33333333-0000-0000-0000-000000000001');
+
+\echo ''
+\echo '--- 23. Pactar el precio en una moneda que no es la del servicio ---'
+insert into bookings (client_id, service_id, location_id, policy_id, session_id, starts_at, ends_at, total_price, currency_id)
+values ('44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000001',
+        '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', gen_random_uuid(),
+        now() + interval '12 days', now() + interval '12 days' + interval '30 minutes',
+        10, '33333333-0000-0000-0000-000000000002');
+
+\echo ''
+\echo '--- 24. Asignar a una reserva de Poblado la silla de la sede Envigado ---'
+insert into booking_resources (booking_id, resource_id, session_id, starts_at, ends_at, status)
+select id, 'cccc0000-0000-0000-0000-000000000006', session_id, starts_at, ends_at, status
+from bookings where id = 'dddd0000-0000-0000-0000-000000000002';
+
+\echo ''
+\echo '--- 25. Una reserva cancelada sin fecha de cancelación ---'
+update bookings set status = 'CANCELLED' where id = 'dddd0000-0000-0000-0000-000000000002';
+
+\echo ''
+\echo '--- 26. Autorregistro de un menor de edad (HU-001) ---'
+insert into clients (id, full_name, document, birth_date, email, phone, city_id, notification_channel)
+values (gen_random_uuid(), 'Menor de Edad', '7777777', current_date - interval '10 years',
+        'menor@example.com', '3001112233', '11111111-0000-0000-0000-000000000001', 'EMAIL');
+
+
+\echo ''
 \echo '#####################  Parte 2: mínimo privilegio  #####################'
 
 \echo ''
-\echo '--- 18. rol_app borra una reserva: el backend nunca borra reservas, las cancela ---'
+\echo '--- 27. rol_app borra una reserva: el backend nunca borra reservas, las cancela ---'
 set role rol_app;
 delete from bookings where id = 'dddd0000-0000-0000-0000-000000000006';
 reset role;
 
 \echo ''
-\echo '--- 19. rol_app edita un historial: sólo puede agregarle filas ---'
+\echo '--- 28. rol_app edita un historial: sólo puede agregarle filas ---'
 set role rol_app;
 update booking_status_changes set reason = 'otro motivo';
 reset role;
 
 \echo ''
-\echo '--- 20. rol_app lee la auditoría: sólo la ve el administrador ---'
+\echo '--- 29. rol_app lee la auditoría: sólo la ve el administrador ---'
 set role rol_app;
 select count(*) from audit_log;
 reset role;
 
 \echo ''
-\echo '--- 21. rol_app crea una tabla: los cambios de esquema son de rol_admin ---'
+\echo '--- 30. rol_app crea una tabla: los cambios de esquema son de rol_admin ---'
 set role rol_app;
 create table tabla_intrusa (id int);
 reset role;
 
 \echo ''
-\echo '--- 22. rol_app cambia un catálogo: se cargan por migración ---'
+\echo '--- 31. rol_app cambia un catálogo: se cargan por migración ---'
 set role rol_app;
 insert into currencies (code, name) values ('EUR', 'Euro');
 reset role;
 
 \echo ''
-\echo '--- 23. rol_lectura lee datos personales de los clientes ---'
+\echo '--- 32. rol_lectura lee datos personales de los clientes ---'
 set role rol_lectura;
 select full_name, email from clients;
 reset role;
 
 \echo ''
-\echo '--- 24. rol_lectura modifica una reserva: sólo lee ---'
+\echo '--- 33. rol_lectura modifica una reserva: sólo lee ---'
 set role rol_lectura;
 update bookings set attendees = 2 where id = 'dddd0000-0000-0000-0000-000000000002';
 reset role;
 
 
 \echo ''
-\echo '--- 25. rol_lectura lee el documento y el teléfono de un proveedor ---'
+\echo '--- 34. rol_lectura lee el documento y el teléfono de un proveedor ---'
 set role rol_lectura;
 select name, identification_number, contact_phone from organizations;
 reset role;
@@ -164,19 +220,28 @@ reset role;
 
 \echo ''
 \echo '#####################  Parte 3: lo que rol_app sí puede  #####################'
-\echo 'Reserva, paga y reescribe una agenda como lo hace el backend. Al final se'
+\echo 'Reserva, asigna un recurso, confirma, paga y reescribe una agenda, como lo'
+\echo 'hace el backend. Al final se'
 \echo 'deshace todo. Si alguna línea dice ERROR, a rol_app le falta un permiso.'
 
 begin;
 set local role rol_app;
 
-insert into bookings (id, client_id, organization_id, service_id, location_id, policy_id, session_id,
-                      starts_at, ends_at, total_price)
+insert into bookings (id, client_id, service_id, location_id, policy_id, session_id,
+                      starts_at, ends_at, total_price, currency_id)
 values ('eeee0000-0000-0000-0000-000000000001', '44444444-0000-0000-0000-000000000004',
-        '66666666-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000002',
-        '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002',
-        'eeee0000-0000-0000-0000-000000000001', now() + interval '9 days',
-        now() + interval '9 days' + interval '45 minutes', 45000);
+        'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001',
+        '77777777-0000-0000-0000-000000000002', 'eeee0000-0000-0000-0000-000000000001',
+        now() + interval '9 days', now() + interval '9 days' + interval '45 minutes',
+        45000, '33333333-0000-0000-0000-000000000001');
+
+insert into booking_resources (booking_id, resource_id, session_id, starts_at, ends_at, status)
+select id, 'cccc0000-0000-0000-0000-000000000003', session_id, starts_at, ends_at, status
+from bookings where id = 'eeee0000-0000-0000-0000-000000000001';
+
+-- Al confirmar, la copia de booking_resources se actualiza sola
+update bookings set status = 'CONFIRMED' where id = 'eeee0000-0000-0000-0000-000000000001';
+select status as copia_sincronizada from booking_resources where booking_id = 'eeee0000-0000-0000-0000-000000000001';
 
 insert into payments (booking_id, amount, currency_id, method)
 values ('eeee0000-0000-0000-0000-000000000001', 45000, '33333333-0000-0000-0000-000000000001', 'CARD');
@@ -207,6 +272,6 @@ rollback;
 
 \echo ''
 \echo '====================================================================='
-\echo ' Las pruebas 1 a 25 debieron terminar en ERROR, y la parte 3 sin'
+\echo ' Las pruebas 1 a 34 debieron terminar en ERROR, y la parte 3 sin'
 \echo ' ningún ERROR. Si no, hay una regla o un permiso mal puesto.'
 \echo '====================================================================='

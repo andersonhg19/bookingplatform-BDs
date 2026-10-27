@@ -14,8 +14,8 @@
 --  Tarda unos minutos.
 --
 --  Las reservas se cargan con los triggers de usuario apagados: son
---  históricas y masivas, y el trigger de cupo sólo tiene sentido para
---  reservas nuevas. Las FK y los CHECK sí se verifican.
+--  históricas y masivas, y las reglas de cupo y de coherencia ya las
+--  cumplen por construcción. Las FK y los CHECK sí se verifican.
 -- =====================================================================
 
 do $$
@@ -24,6 +24,10 @@ begin
         raise exception 'generar-volumen.sql es para la base "volumen", no para "%"', current_database();
     end if;
 end $$;
+
+-- Semilla fija: random() da siempre la misma secuencia, así que los
+-- conteos y los planes del análisis se pueden reproducir.
+select setseed(0.42);
 
 \timing on
 
@@ -64,25 +68,25 @@ from generate_series(1, 680) i
     cross join generate_series(1, 8) k;
 
 -- Cada servicio en la primera sede; los pares también en la segunda
-insert into service_locations (service_id, location_id, organization_id)
-select md5('s' || i || '-' || k)::uuid, md5('l' || i || '-' || 1)::uuid, md5('o' || i)::uuid
+insert into service_locations (service_id, location_id)
+select md5('s' || i || '-' || k)::uuid, md5('l' || i || '-' || 1)::uuid
 from generate_series(1, 680) i cross join generate_series(1, 8) k
 union all
-select md5('s' || i || '-' || k)::uuid, md5('l' || i || '-' || 2)::uuid, md5('o' || i)::uuid
+select md5('s' || i || '-' || k)::uuid, md5('l' || i || '-' || 2)::uuid
 from generate_series(1, 680) i cross join generate_series(1, 8) k
 where i % 2 = 0 and k % 2 = 0;
 
 -- 56 000 clientes
-insert into clients (id, full_name, document, birth_date, email, phone, city, notification_channel, status, created_at, updated_at)
+insert into clients (id, full_name, document, birth_date, email, phone, city_id, notification_channel, status)
 select md5('c' || i)::uuid, 'Cliente ' || i, (1000000000 + i)::text, date '1970-01-01' + (i % 7000),
-       'cliente' || i || '@example.com', '300' || lpad(i::text, 7, '0'), 'Medellín', 'EMAIL', 'ACTIVE',
-       localtimestamp, localtimestamp
+       'cliente' || i || '@example.com', '300' || lpad(i::text, 7, '0'),
+       (select id from cities order by name offset (i % 3) limit 1), 'EMAIL', 'ACTIVE'
 from generate_series(1, 56000) i;
 
 -- Tabla de apoyo para escoger un servicio al azar con su sede y su política
 create temporary table svc as
-select row_number() over (order by s.id) as n, s.id, s.organization_id, sl.location_id,
-       s.price, s.duration_minutes,
+select row_number() over (order by s.id) as n, s.id, sl.location_id,
+       s.price, s.currency_id, s.duration_minutes,
        md5('p' || substr(o.name, 11))::uuid as policy_id   -- 'Proveedor 12' -> la política p12
 from services s
     inner join organizations o on o.id = s.organization_id
@@ -92,10 +96,10 @@ from services s
 -- 1 584 000 reservas repartidas en 2026
 alter table bookings disable trigger user;
 
-insert into bookings (id, client_id, organization_id, service_id, location_id, policy_id, session_id,
-                      starts_at, ends_at, attendees, total_price, status, cancelled_at, created_at, updated_at)
-select r.id, r.client_id, v.organization_id, v.id, v.location_id, v.policy_id, r.id,
-       r.inicio, r.inicio + make_interval(mins => v.duration_minutes), 1, v.price,
+insert into bookings (id, client_id, service_id, location_id, policy_id, session_id,
+                      starts_at, ends_at, attendees, total_price, currency_id, status, cancelled_at, created_at, updated_at)
+select r.id, r.client_id, v.id, v.location_id, v.policy_id, r.id,
+       r.inicio, r.inicio + make_interval(mins => v.duration_minutes), 1, v.price, v.currency_id,
        r.estado,
        case when r.estado = 'CANCELLED' then r.inicio - interval '1 day' end,
        r.inicio - interval '3 days', r.inicio - interval '3 days'

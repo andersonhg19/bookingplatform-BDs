@@ -5,7 +5,8 @@ Sprint 2 · Bases de Datos · CodeF@ctory 2026-II
 Este documento cubre los criterios 7, 8 y 9 de la rúbrica. Hago todos los cálculos con las fórmulas de
 referencia del curso y después los comparo con lo que mide PostgreSQL. Para medir llené una base
 con el volumen estimado para el final del primer año usando
-[`generar-volumen.sql`](generar-volumen.sql).
+[`generar-volumen.sql`](generar-volumen.sql), que usa una semilla fija para que los conteos se puedan
+reproducir.
 
 | | |
 |---|---|
@@ -37,8 +38,8 @@ o una sede:
 
 | Índice | Columnas | Lo usa |
 |---|---|---|
-| `bookings_pkey` | `id` | buscar una reserva; destino de las FK de pagos, reseñas e historial |
-| `uk_bookings_snapshot` | `id, starts_at, ends_at, status` | destino de la FK compuesta de `booking_resources` |
+| `pk_bookings` | `id` | buscar una reserva; destino de las FK de pagos, reseñas e historial |
+| `uk_bookings_snapshot` | `id, session_id, starts_at, ends_at, status` | destino de la FK compuesta de `booking_resources` |
 | `ix_bookings_client_starts` | `client_id, starts_at desc` | historial de reservas de un cliente |
 | `ix_bookings_location_starts` | `location_id, starts_at` | agenda y ocupación de una sede |
 | `ix_bookings_service` | `service_id` | reportes por servicio; la consulta de la sección 4 |
@@ -56,7 +57,7 @@ fechas de reserva no llegan en orden, porque hoy se reserva para dentro de un me
 
 | Campo | Tipo | Bytes | |
 |---|---|---|---|
-| `id`, `client_id`, `organization_id`, `service_id`, `location_id`, `policy_id`, `session_id` | `uuid` | 7 × 16 = 112 | fijo |
+| `id`, `client_id`, `service_id`, `location_id`, `policy_id`, `session_id`, `currency_id` | `uuid` | 7 × 16 = 112 | fijo |
 | `starts_at`, `ends_at`, `cancelled_at`, `created_at`, `updated_at` | `timestamptz` | 5 × 8 = 40 | fijo |
 | `attendees` | `integer` | 4 | fijo |
 | `total_price` | `numeric(12,2)` | ≈ 8 | variable |
@@ -68,6 +69,9 @@ fechas de reserva no llegan en orden, porque hoy se reserva para dentro de un me
 - Tamaño estimado de los variables: 8 + 9 = **17 bytes**
 
 **L = 8 + 156 + 2 + 17 = 183 bytes**
+
+Al normalizar, `bookings` perdió `organization_id`, que salía del servicio, y ganó `currency_id`, la
+moneda del precio pactado. Los dos son `uuid`, así que L no cambió.
 
 ### 3.2 Registros por bloque (FR) y páginas (BR)
 
@@ -81,7 +85,7 @@ BR = ⌈1 584 000 / 43⌉ = ⌈36 837,2⌉ = **36 838 páginas**
 
 Espacio de la tabla = 36 838 × 8 192 bytes = 301 776 896 bytes ≈ **288 MB**
 
-### 3.3 Índice `bookings_pkey`
+### 3.3 Índice `pk_bookings`
 
 Elijo el índice de la clave primaria porque es el que usan todas las claves foráneas que apuntan a
 una reserva, y porque cada reserva es un valor distinto: V(id, bookings) = TR. Hay uno más grande,
@@ -124,8 +128,8 @@ Con las 1 584 000 reservas cargadas en orden aleatorio, como llegarían en produ
 |---|---|---|---|
 | Páginas de `bookings` | 36 838 | 39 600 | +7,5 % |
 | Registros por página | 43 | 40 | |
-| Altura de `bookings_pkey` | 3 | 3 (raíz en el nivel 2 de `bt_metap`) | igual |
-| Páginas de `bookings_pkey` | ≤ 8 564 | 8 307 | dentro de la cota |
+| Altura de `pk_bookings` | 3 | 3 (raíz en el nivel 2 de `bt_metap`) | igual |
+| Páginas de `pk_bookings` | ≤ 8 564 | 8 263 | dentro de la cota |
 
 La tabla mide un 7,5 % más porque PostgreSQL le pone a cada tupla una cabecera de 23 bytes y a cada
 página una de 24, y la fórmula del curso no las cuenta. Con la fila real de 200 bytes que mide
@@ -179,10 +183,11 @@ order by ingresos desc;
 | Fracción del mes | 1/12 | reservas repartidas parejo en el año |
 | Fracción de estados | 0,75 | supuesto: 60 % `COMPLETED` + 15 % `CONFIRMED` |
 | HI de `uk_services_org_name` | 2 | entrada de 16 + 20 + 6 = 42 bytes → FR = 195, d = 98 → ⌈log₉₈ 5 440⌉ = ⌈1,88⌉ = 2 |
-| HI de `ix_bookings_service` | 3 | tiene una entrada por reserva, TR en total, igual que `bookings_pkey` |
+| HI de `ix_bookings_service` | 3 | tiene una entrada por reserva, TR en total, igual que `pk_bookings` |
 
-En la base de volumen, `pg_stats` da n_distinct(service_id) = 5 438 y n_distinct(organization_id) = 680,
-que coinciden con los supuestos.
+En la base de volumen, `pg_stats` da n_distinct(bookings.service_id) = 5 437 y, para
+`services.organization_id`, −0,125, que PostgreSQL usa para decir "una fracción de las filas":
+0,125 × 5 440 = 680. Coinciden con los supuestos.
 
 **Tamaño de la salida.** `service_id` referencia la clave de `services`, así que la reunión completa
 devuelve TR = 1 584 000 tuplas. Con los filtros quedan
@@ -233,24 +238,24 @@ Costo = BR + BS + 2·BR·2 + 2·BS·1 = 36 838 + 133 + 147 352 + 266 = **184 589
 | Alternativa | Costo calculado (páginas) | Medido en PostgreSQL |
 |---|---|---|
 | A. Ciclos anidados | 36 971 | |
-| **B. Ciclos anidados con índice** | **2 346** (2 370 con el descenso por el índice) | **2 366**, el plan que elige el optimizador |
+| **B. Ciclos anidados con índice** | **2 346** (2 370 con el descenso por el índice) | **2 338**, el plan que elige el optimizador |
 | C. Hash, en memoria | 36 848 | 39 613, forzado con `enable_nestloop = off` |
 | D. Ordenamiento y mezcla | 184 589 | |
 
 B es unas 16 veces más barata que A o C porque sólo lee las reservas de 8 servicios de 5 440. A y C
 leen la tabla entera para quedarse con 146 filas. El `EXPLAIN (ANALYZE, BUFFERS)` de B lo confirma:
-10 páginas de `services`, 24 del índice (8 búsquedas × 3 niveles) y 2 332 de `bookings`. La medición
+10 páginas de `services`, 24 del índice (8 búsquedas × 3 niveles) y 2 304 de `bookings`. La medición
 de C da más que el cálculo porque la tabla real tiene 39 600 páginas y no 36 838 (sección 3.4).
 
 **Lo que dejaría todavía más barata la consulta.** Con un índice `(service_id, starts_at)`, el filtro
 de fecha entraría en la búsqueda del índice y sólo se leerían las reservas del mes. Lo probé: baja de
-2 366 a **260 páginas**, a cambio de 61 MB más de índice. Ese índice haría redundante a
+2 338 a **226 páginas**, a cambio de 61 MB más de índice. Ese índice haría redundante a
 `ix_bookings_service`, que es del equipo, así que lo dejo como propuesta para cambiarlos juntos y no
 lo agrego por mi cuenta.
 
 ## 5. Optimización algebraica
 
-Uso la notación del curso. `bookings` y `services` comparten los nombres `id`, `organization_id`,
+Uso la notación del curso. `bookings` y `services` comparten los nombres `id`, `currency_id`,
 `status`, `created_at` y `updated_at`, y el producto cartesiano exige cabeceras sin nombres repetidos.
 Por eso renombro `services` antes del producto:
 
@@ -363,7 +368,7 @@ En E₁ los filtros actúan antes de la reunión, así que sólo se combinan los
 con las reservas del mes. Las proyecciones además reducen cada reserva de 183 a 40 bytes antes de
 que suba por el árbol.
 
-En la base de volumen, σ p₃ ∧ p₄ (B) da 101 143 tuplas y la reunión 160. Había estimado 99 000 y 146.
+En la base de volumen, σ p₃ ∧ p₄ (B) da 101 225 tuplas y la reunión 151. Había estimado 99 000 y 146.
 
 El plan que ejecuta PostgreSQL, el B de la sección 4.3, es la forma física de E₁ con una diferencia:
 no materializa σ p₃ ∧ p₄ (B) entera. Usa el índice sobre `service_id` para traer sólo las reservas de
