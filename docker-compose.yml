@@ -38,8 +38,8 @@ services:
       - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
     healthcheck:
-      # No basta con que el proceso viva: se comprueba que las 29 tablas existan
-      test: ["CMD-SHELL", "psql -U postgres -d reservas -tAc \"select case when count(*) = 29 then 1 else 0 end from information_schema.tables where table_schema='public'\" | grep -q 1"]
+      # No basta con que el proceso viva: se comprueba que las 30 tablas existan
+      test: ["CMD-SHELL", "psql -U postgres -d reservas -tAc \"select case when count(*) = 30 then 1 else 0 end from information_schema.tables where table_schema='public'\" | grep -q 1"]
       interval: 5s
       timeout: 5s
       retries: 20

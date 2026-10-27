@@ -6,7 +6,7 @@
 --  sus restricciones, índices, triggers, roles y políticas.
 --
 --  Parte del esquema que el equipo tiene en producción (Sprint 1 más sus
---  migraciones V3 a V9) y lo lleva a 3FN:
+--  migraciones V3 a V9) y lo normaliza (BCNF salvo dos tablas, ver README):
 --    · Quita las columnas que se repetían para armar claves foráneas
 --      compuestas (organization_id en sedes de servicio, recursos,
 --      requisitos, agendas y reservas; location_id en agenda_services y

@@ -11,18 +11,19 @@ La entrega del Sprint 1 está intacta en [`sprint-1/`](sprint-1/) y en la etique
 
 | Archivo | Qué es |
 |---|---|
-| [`schema.sql`](schema.sql) | Modelo físico completo: 29 tablas, restricciones, índices, triggers, roles y RLS |
+| [`schema.sql`](schema.sql) | Modelo físico completo: 30 tablas normalizadas, restricciones, índices, triggers, roles y RLS |
 | [`seed.sql`](seed.sql) | Datos de prueba, pensados para que todas las consultas devuelvan filas |
 | [`consultas.sql`](consultas.sql) | Las 24 preguntas clave: 14 del Sprint 1 y 10 del Sprint 2 |
-| [`pruebas-integridad.sql`](pruebas-integridad.sql) | 25 violaciones de datos y de permisos que la base rechaza |
+| [`pruebas-integridad.sql`](pruebas-integridad.sql) | 34 violaciones de datos y de permisos que la base rechaza |
 | [`docs/analisis-almacenamiento.md`](docs/analisis-almacenamiento.md) | Almacenamiento, índices, costo de una consulta y su optimización |
 | [`docs/generar-volumen.sql`](docs/generar-volumen.sql) | Carga 1,58 millones de reservas para comprobar el análisis |
 | [`docker-compose.yml`](docker-compose.yml) | PostgreSQL 16 y pgAdmin con todo cargado |
 
 **Contenido:** [Qué cambió](#qué-cambió-frente-al-sprint-1) ·
-[MER](#1-mer-refinado) · [Modelo físico](#2-modelo-físico) · [schema.sql](#3-schemasql) ·
-[Consultas](#4-consultas) · [Volumen](#5-estimación-de-volumen) · [Seguridad](#6-roles-y-seguridad) ·
-[Análisis](#7-análisis-de-almacenamiento-costo-y-optimización) · [Rúbrica](#dónde-está-cada-criterio-de-la-rúbrica)
+[MER](#1-mer-refinado) · [Modelo físico](#2-modelo-físico) · [Normalización](#normalización) ·
+[schema.sql](#3-schemasql) · [Consultas](#4-consultas) · [Volumen](#5-estimación-de-volumen) ·
+[Seguridad](#6-roles-y-seguridad) · [Análisis](#7-análisis-de-almacenamiento-costo-y-optimización) ·
+[Rúbrica](#dónde-está-cada-criterio-de-la-rúbrica)
 
 ## Cómo probarlo
 
@@ -32,7 +33,7 @@ docker compose up -d
 
 Levanta PostgreSQL 16 en `localhost:5432` con `schema.sql` y `seed.sql` ya cargados, y pgAdmin en
 <http://localhost:8080>. Las credenciales del `docker-compose.yml` son de desarrollo local. El
-contenedor sólo queda `healthy` si existen las 29 tablas.
+contenedor sólo queda `healthy` si existen las 30 tablas.
 
 ```bash
 docker compose cp consultas.sql postgres:/tmp/
@@ -45,62 +46,182 @@ Para empezar de cero: `docker compose down -v && docker compose up -d`.
 
 ## Qué cambió frente al Sprint 1
 
-En el Sprint 1 entregué 19 tablas. Después el equipo adoptó Flyway y, con las historias del Sprint 2,
-hizo cambios al esquema en las migraciones V3 a V9 del backend. Yo sumé seis tablas para cubrir
-partes del caso que todavía no tenían dónde guardarse. El resultado son 29 tablas.
+En el Sprint 1 entregué 19 tablas. En el Sprint 2 pasaron tres cosas: el equipo cambió el esquema con
+sus migraciones, yo normalicé lo que había y agregué tablas nuevas. El resultado son 30 tablas.
 
-**Lo que hizo el equipo** (está en `src/main/resources/db/migration`; aquí está consolidado en un solo
-archivo):
+**1. Lo que hizo el equipo.** Adoptó Flyway y, con las historias del Sprint 2, cambió el esquema en
+las migraciones V3 a V9 del backend. Todo eso está incorporado aquí.
 
 | Migración | Cambio | HU |
 |---|---|---|
-| V3 | Un servicio nace `INACTIVE`. `fn_bookings_reglas` sólo valida lo que compromete agenda nueva y resiste reservas simultáneas por el último cupo | 004, 009, 010 |
+| V3 | Un servicio nace `INACTIVE`. La regla de reservas sólo valida lo que compromete agenda nueva y resiste reservas simultáneas por el último cupo | 004, 009, 010 |
 | V4 | `organizations.nit` pasa a `identification_type` + `identification_number`, porque una persona natural también presta servicios | 002 |
 | V6 | Nueva `sent_emails`: Render bloquea SMTP y el correo se guarda en una bandeja | — |
-| V7 | `resources` gana `capacity` y `organization_id`, y su estado pasa a `ACTIVE`/`RETIRED`. Nueva `resource_maintenances` | 009 |
-| V8 | Nuevas `agendas` y `agenda_services`. `schedules` deja de colgar de la sede y pasa a ser un bloque de una agenda | 006 |
+| V7 | `resources` gana capacidad y su estado pasa a `ACTIVE`/`RETIRED`. Nueva `resource_maintenances` | 009 |
+| V8 | Nuevas `agendas` y `agenda_services`. `schedules` pasa a ser un bloque de una agenda | 006 |
 | V9 | Función `f_sin_tildes` para buscar sin distinguir tildes | 005 |
 
-**Lo que agregué yo en este sprint:**
+**2. Lo que normalicé.** El esquema del Sprint 1, y lo que el equipo construyó encima, repetía
+`organization_id` y `location_id` en varias tablas para poder declarar claves foráneas compuestas que
+impidieran mezclar datos de dos proveedores. Funcionaba, pero esas columnas dependían de otra columna
+que no era la clave y rompían 2FN o 3FN. En esta entrega las quité, y lo que garantizaban pasó a
+triggers cortos. Detalle en [Normalización](#normalización).
+
+| Tabla | Antes | Ahora |
+|---|---|---|
+| `service_locations`, `resources`, `service_resource_requirements`, `agendas`, `bookings` | guardaban `organization_id` | sale del servicio, la sede o el tipo de recurso |
+| `agenda_services`, `booking_resources` | guardaban `location_id` | sale de la agenda o del recurso |
+| `account_status_changes` | una tabla para clientes y proveedores, con un tipo y dos FK de las que siempre una era nula | `organization_status_changes` y `client_status_changes` |
+| `clients` | `city` como texto libre: "Medellin" y "Medellín" eran dos ciudades | `city_id`, FK al catálogo `cities` |
+| `clients`, `login_attempts` | fechas `timestamp` sin zona horaria | `timestamptz`, como el resto del esquema |
+| `clients` | la mayoría de edad en un `CHECK` con `current_date`, que no es inmutable y rompe un restore | un trigger que la revisa al escribir |
+| `bookings` | el precio pactado sin moneda | `currency_id`: el precio se congela con su moneda |
+| `booking_resources` | la FK que sincroniza la copia no incluía `session_id` | la incluye |
+| `organization_members`, `service_resource_requirements` | `id` sustituto más una `UNIQUE` con la clave real | la clave real es la PK |
+| Todas | nombres de restricción mezclados (`ck_bsc_`, `<tabla>_pkey`) | un solo patrón: `pk_`, `fk_`, `uk_`, `ck_`, `ex_`, `ix_`, `ux_` + tabla |
+
+Esto cambia el modelo frente a lo que el backend tiene en producción. **No toqué el repositorio del
+equipo:** esta entrega es la propuesta de cómo debería quedar la base, y llevarla al backend sería una
+migración nueva de ellos (V10 en adelante) junto con el ajuste de sus entidades JPA.
+
+**3. Las tablas nuevas:**
 
 | Tabla nueva | Para qué | Por qué hacía falta |
 |---|---|---|
-| `agenda_exceptions` | Festivos, cierres y jornadas recortadas | `schedules` sólo sabe de días de la semana. En el Sprint 1 lo dejé anotado en "lo que no garantiza" |
+| `agenda_exceptions` | Festivos, cierres y jornadas recortadas | `schedules` sólo sabe de días de la semana |
 | `booking_reviews` | Calificación de 1 a 5 de una reserva atendida | El caso pide reportes de uso, y la calidad del servicio es parte del uso |
-| `waitlist_entries` | Lista de espera cuando no hay cupo | Completa el control de disponibilidad: hoy, si no hay cupo, el cliente simplemente se pierde |
-| `payments` | Pagos, intentos fallidos y reembolsos | `bookings.total_price` dice cuánto se pactó, pero nada decía si se pagó o se devolvió |
-| `resource_occupancy_daily` | Ocupación diaria por recurso | Los "reportes sobre ocupación y uso" del caso, sin recorrer todas las reservas cada vez |
+| `waitlist_entries` | Lista de espera cuando no hay cupo | Completa el control de disponibilidad: si no había cupo, el cliente se perdía |
+| `payments` | Pagos, intentos fallidos y reembolsos | `bookings.total_price` dice cuánto se pactó, pero nada decía si se pagó |
+| `resource_occupancy_daily` | Ocupación diaria por recurso | Los "reportes sobre ocupación y uso" del caso, sin recorrer todas las reservas |
 | `audit_log` | Quién cambió qué y cuándo | Seguridad: los cambios a clientes, proveedores, políticas, servicios, pagos y reseñas quedan registrados por trigger |
-
-Además: un índice que faltaba en `schedules(agenda_id)`, los triggers de auditoría, y los roles,
-permisos y políticas de la sección 6.
-
-**Lo que no toqué.** Yo no renombré ni eliminé nada; los cambios de nombre de la tabla de arriba los
-hizo el equipo en sus migraciones. Comparé el catálogo de las
-23 tablas del equipo después de aplicar sus migraciones V1 a V9 con el que crea este `schema.sql`:
-columnas, tipos, nulos, defaults, restricciones, índices y el cuerpo de sus funciones son idénticos.
-Lo único distinto es lo que agregué.
 
 ## 1. MER refinado
 
-Son 29 tablas, así que las parto en tres vistas. Las tablas nuevas de este sprint dicen **S2 nueva**
-en su clave primaria; las que el equipo cambió dicen **S2 V*n***. Algunas tablas aparecen en dos vistas
-para que se vea con qué se conectan.
+Son 30 tablas, así que primero va una vista general por dominios y después tres vistas de entidad
+relación con las claves, los atributos principales y las cardinalidades. En las vistas de detalle, las tablas nuevas del sprint dicen
+**S2 nueva** en su clave primaria y las que normalicé dicen **S2 normalizada**.
 
 `auth.users` la gestiona Supabase Auth y no se crea aquí. Por eso `clients.id`,
 `organization_members.user_id` y los `changed_by` no tienen clave foránea declarada.
+
+### Vista general
+
+Cada flecha va de la tabla padre (1) a la hija (N); las punteadas son relaciones opcionales. **Verde:** tabla nueva del Sprint 2. **Amarillo:** tabla que normalicé en este sprint.
+
+```mermaid
+flowchart LR
+    subgraph CAT["Catálogos"]
+        cities
+        organization_categories
+        currencies
+    end
+    subgraph IDE["Identidad"]
+        clients
+        client_status_changes
+        login_attempts
+    end
+    subgraph ORG["Organización"]
+        organizations
+        organization_members
+        organization_policies
+        organization_status_changes
+        locations
+    end
+    subgraph SER["Servicios y recursos"]
+        services
+        service_locations
+        resource_types
+        service_resource_requirements
+        resources
+        resource_maintenances
+    end
+    subgraph AGE["Agendas"]
+        agendas
+        agenda_services
+        schedules
+        agenda_exceptions
+    end
+    subgraph RES["Reservas y pagos"]
+        bookings
+        booking_resources
+        booking_status_changes
+        booking_reviews
+        waitlist_entries
+        payments
+    end
+    subgraph REP["Reportes"]
+        resource_occupancy_daily
+    end
+    subgraph AUD["Notificaciones y auditoría"]
+        sent_emails
+        audit_log
+    end
+
+    cities --> clients
+    cities --> locations
+    clients --> client_status_changes
+    organization_categories --> organizations
+    organizations --> organization_members
+    organizations --> organization_policies
+    organizations --> organization_status_changes
+    organizations --> locations
+    organizations --> services
+    organizations --> resource_types
+    currencies --> services
+    services --> service_locations
+    locations --> service_locations
+    services --> service_resource_requirements
+    resource_types --> service_resource_requirements
+    resource_types --> resources
+    locations --> resources
+    resources --> resource_maintenances
+    resources --> resource_occupancy_daily
+    locations --> agendas
+    resources -.-> agendas
+    agendas --> agenda_services
+    services --> agenda_services
+    agendas --> schedules
+    agendas --> agenda_exceptions
+    clients --> bookings
+    service_locations --> bookings
+    organization_policies --> bookings
+    currencies --> bookings
+    bookings --> booking_resources
+    resources --> booking_resources
+    bookings --> booking_status_changes
+    bookings --> booking_reviews
+    bookings --> payments
+    currencies --> payments
+    clients --> waitlist_entries
+    service_locations --> waitlist_entries
+    bookings -.-> waitlist_entries
+
+    classDef nueva fill:#d8f3dc,stroke:#2d6a4f,color:#1b4332
+    classDef normalizada fill:#fff3bf,stroke:#b08900,color:#5c4400
+    class agenda_exceptions,booking_reviews,waitlist_entries,payments,resource_occupancy_daily,audit_log nueva
+    class clients,client_status_changes,login_attempts,organization_members,organization_status_changes,service_locations,service_resource_requirements,resources,agendas,agenda_services,bookings,booking_resources normalizada
+    style CAT fill:#f8f9fa,stroke:#adb5bd
+    style IDE fill:#f8f9fa,stroke:#adb5bd
+    style ORG fill:#f8f9fa,stroke:#adb5bd
+    style SER fill:#f8f9fa,stroke:#adb5bd
+    style AGE fill:#f8f9fa,stroke:#adb5bd
+    style RES fill:#f8f9fa,stroke:#adb5bd
+    style REP fill:#f8f9fa,stroke:#adb5bd
+    style AUD fill:#f8f9fa,stroke:#adb5bd
+```
 
 ### Identidad y organización
 
 ```mermaid
 erDiagram
+    cities ||--o{ clients : "vive en"
+    cities ||--o{ locations : ubica
+    clients ||--o{ client_status_changes : "cambia de estado"
     organization_categories ||--o{ organizations : clasifica
     organizations ||--o{ organization_members : "tiene personal"
     organizations ||--o{ organization_policies : "versiona sus reglas"
     organizations ||--o{ locations : "tiene sedes"
-    cities ||--o{ locations : ubica
-    organizations |o--o{ account_status_changes : "cambia de estado"
-    clients |o--o{ account_status_changes : "cambia de estado"
+    organizations ||--o{ organization_status_changes : "cambia de estado"
 
     cities {
         uuid id PK
@@ -112,21 +233,29 @@ erDiagram
         varchar name UK
     }
     clients {
-        uuid id PK "= auth.users.id"
+        uuid id PK "S2 normalizada; = auth.users.id"
+        uuid city_id FK
         varchar document UK
         varchar email UK
         varchar full_name
         date birth_date "mayor de 18"
         varchar status "PENDING_VERIFICATION, ACTIVE, SUSPENDED"
     }
+    client_status_changes {
+        uuid id PK "S2 normalizada"
+        uuid client_id FK
+        varchar from_status
+        varchar to_status
+        varchar reason "obligatorio"
+    }
     login_attempts {
         bigint id PK
-        varchar email
+        varchar email "no es FK: también correos inexistentes"
         boolean success
-        timestamp attempted_at
+        timestamptz attempted_at
     }
     organizations {
-        uuid id PK "S2 V4"
+        uuid id PK
         uuid category_id FK
         varchar identification_type UK "NIT, CC, CE, PASAPORTE"
         varchar identification_number UK
@@ -135,9 +264,8 @@ erDiagram
         timestamptz approved_at
     }
     organization_members {
-        uuid id PK
-        uuid organization_id FK
-        uuid user_id UK "único con organization_id"
+        uuid organization_id PK, FK "S2 normalizada"
+        uuid user_id PK
         varchar role "OWNER, MANAGER, STAFF"
     }
     organization_policies {
@@ -154,15 +282,14 @@ erDiagram
         uuid id PK
         uuid organization_id FK
         uuid city_id FK
-        varchar name UK "único por organización"
-        varchar timezone "nulo = la de la organización"
+        varchar name UK "único por proveedor"
+        varchar timezone "nulo = la del proveedor"
         varchar status "ACTIVE, INACTIVE"
     }
-    account_status_changes {
-        uuid id PK
-        varchar subject_type "CLIENT u ORGANIZATION"
-        uuid client_id FK
+    organization_status_changes {
+        uuid id PK "S2 normalizada"
         uuid organization_id FK
+        varchar from_status
         varchar to_status
         varchar reason "obligatorio"
         int affected_bookings
@@ -174,32 +301,29 @@ erDiagram
 ```mermaid
 erDiagram
     organizations ||--o{ services : ofrece
+    organizations ||--o{ resource_types : define
     currencies ||--o{ services : "cobra en"
     services ||--o{ service_locations : "se presta en"
     locations ||--o{ service_locations : presta
-    organizations ||--o{ resource_types : define
     services ||--o{ service_resource_requirements : exige
     resource_types ||--o{ service_resource_requirements : "es exigido"
     resource_types ||--o{ resources : "tiene instancias"
     locations ||--o{ resources : aloja
     resources ||--o{ resource_maintenances : "entra a mantenimiento"
+    resources ||--o{ resource_occupancy_daily : "se mide"
     locations ||--o{ agendas : "tiene agendas"
     resources |o--o{ agendas : "puede tener agenda propia"
     agendas ||--o{ agenda_services : habilita
-    service_locations ||--o{ agenda_services : "es reservable en"
+    services ||--o{ agenda_services : "es reservable en"
     agendas ||--o{ schedules : "tiene bloques"
     agendas ||--o{ agenda_exceptions : "tiene excepciones"
-    resources ||--o{ resource_occupancy_daily : "se mide"
 
-    services {
-        uuid id PK "S2 V3"
+    organizations {
+        uuid id PK
+    }
+    locations {
+        uuid id PK
         uuid organization_id FK
-        uuid currency_id FK
-        varchar name UK "único por organización"
-        int duration_minutes
-        numeric price
-        int customer_capacity "1 individual, mayor que 1 grupal"
-        varchar status "nace INACTIVE"
     }
     currencies {
         uuid id PK
@@ -207,29 +331,32 @@ erDiagram
         varchar name UK
         boolean active
     }
-    locations {
+    services {
         uuid id PK
         uuid organization_id FK
+        uuid currency_id FK
+        varchar name UK "único por proveedor"
+        int duration_minutes
+        numeric price
+        int customer_capacity "1 individual, mayor que 1 grupal"
+        varchar status "nace INACTIVE"
     }
     service_locations {
-        uuid service_id PK, FK
+        uuid service_id PK, FK "S2 normalizada"
         uuid location_id PK, FK
-        uuid organization_id FK "impide mezclar proveedores"
     }
     resource_types {
         uuid id PK
         uuid organization_id FK
-        varchar name UK "único por organización"
+        varchar name UK "único por proveedor"
     }
     service_resource_requirements {
-        uuid id PK
-        uuid service_id FK
-        uuid resource_type_id FK
+        uuid service_id PK, FK "S2 normalizada"
+        uuid resource_type_id PK, FK
         int quantity_required
     }
     resources {
-        uuid id PK "S2 V7"
-        uuid organization_id FK
+        uuid id PK "S2 normalizada"
         uuid resource_type_id FK
         uuid location_id FK
         varchar name UK "único por sede"
@@ -237,29 +364,27 @@ erDiagram
         varchar status "ACTIVE, RETIRED"
     }
     resource_maintenances {
-        uuid id PK "S2 V7"
+        uuid id PK
         uuid resource_id FK
         timestamptz starts_at "no se solapan"
         timestamptz ends_at
         varchar reason
     }
     agendas {
-        uuid id PK "S2 V8"
-        uuid organization_id FK
+        uuid id PK "S2 normalizada"
         uuid location_id FK
         uuid resource_id FK "nulo = toda la sede"
-        varchar name UK "único por organización"
+        varchar name UK "única por sede"
         smallint slot_minutes "15, 30 o 60"
         date valid_from
         date valid_until "nulo = sin fin"
     }
     agenda_services {
-        uuid agenda_id PK, FK "S2 V8"
+        uuid agenda_id PK, FK "S2 normalizada"
         uuid service_id PK, FK
-        uuid location_id FK
     }
     schedules {
-        uuid id PK "S2 V8"
+        uuid id PK
         uuid agenda_id FK
         smallint day_of_week "1 lunes a 7 domingo"
         time start_time "no se solapan"
@@ -290,6 +415,7 @@ erDiagram
     clients ||--o{ bookings : reserva
     service_locations ||--o{ bookings : "se reserva en"
     organization_policies ||--o{ bookings : "fija las condiciones de"
+    currencies ||--o{ bookings : "precio en"
     bookings ||--o{ booking_resources : ocupa
     resources ||--o{ booking_resources : "es ocupado"
     bookings ||--o{ booking_status_changes : "cambia de estado"
@@ -298,7 +424,7 @@ erDiagram
     service_locations ||--o{ waitlist_entries : "tiene espera"
     bookings |o--o{ waitlist_entries : "sale de"
     bookings ||--o{ payments : "se paga con"
-    currencies ||--o{ payments : "en moneda"
+    currencies ||--o{ payments : "cobrado en"
 
     clients {
         uuid id PK
@@ -310,19 +436,19 @@ erDiagram
     organization_policies {
         uuid id PK
     }
-    resources {
-        uuid id PK
-    }
     currencies {
         uuid id PK
     }
-    bookings {
+    resources {
         uuid id PK
+    }
+    bookings {
+        uuid id PK "S2 normalizada"
         uuid client_id FK
-        uuid organization_id FK
-        uuid service_id FK
+        uuid service_id FK "con location_id, FK a service_locations"
         uuid location_id FK
         uuid policy_id FK "congela las condiciones"
+        uuid currency_id FK "moneda del precio pactado"
         uuid session_id "compartida en grupales"
         timestamptz starts_at
         timestamptz ends_at
@@ -331,10 +457,10 @@ erDiagram
         varchar status "RESERVED, CONFIRMED, CANCELLED, COMPLETED, NO_SHOW"
     }
     booking_resources {
-        uuid booking_id PK, FK
+        uuid booking_id PK, FK "S2 normalizada"
         uuid resource_id PK, FK
-        uuid session_id
-        timestamptz starts_at "copia sincronizada por FK"
+        uuid session_id "copia sincronizada por FK"
+        timestamptz starts_at
         timestamptz ends_at
         varchar status
     }
@@ -374,7 +500,7 @@ erDiagram
         timestamptz refunded_at
     }
     sent_emails {
-        uuid id PK "S2 V6"
+        uuid id PK
         varchar recipient
         varchar subject
         text body
@@ -392,11 +518,6 @@ erDiagram
     }
 ```
 
-En `bookings` dibujé la relación con `service_locations`, que es la que fija servicio y sede. Sus
-otras FK, hacia `services`, `locations` y `organization_policies`, son compuestas con
-`organization_id` y existen para que una reserva no mezcle datos de dos proveedores. Van en el modelo
-físico.
-
 `sent_emails` y `audit_log` no tienen claves foráneas a propósito. Un correo puede ir a una dirección
 que no es de ningún cliente, y una fila de auditoría tiene que sobrevivir al registro que describe.
 
@@ -404,14 +525,12 @@ que no es de ningún cliente, y una fila de auditoría tiene que sobrevivir al r
 
 Esta sección la generé desde el catálogo de PostgreSQL después de correr `schema.sql`, así que
 corresponde a lo que crea el script. Sólo le quité los casts que PostgreSQL agrega al reescribir las
-restricciones (`::text`, `= ANY (ARRAY[...])`) para que se lean como en el `schema.sql`. Cada tabla trae sus columnas con tipo, nulo, default y clave, y
-debajo las restricciones que abarcan varias columnas, los `CHECK` y los `EXCLUDE`.
+restricciones (`::text`, `= ANY (ARRAY[...])`) para que se lean como en el `schema.sql`. Cada tabla
+trae sus columnas con tipo, nulo, default y clave, y debajo las restricciones que abarcan varias
+columnas, los `CHECK` y los `EXCLUDE`.
 
-Convención de nombres: `pk_`, `fk_`, `uk_`, `ck_`, `ex_`, `ix_` y `ux_` (índice único), seguidos del
-nombre de la tabla y de lo que controlan. Las seis tablas nuevas la siguen completa. En las del equipo
-la conservé como estaba: algunas PK tienen el nombre automático `<tabla>_pkey` y dos prefijos están
-abreviados (`ck_bsc_`, `ix_asc_`). No los cambio porque esas tablas ya están en producción y la regla
-del equipo es no renombrar.
+Todas las restricciones e índices siguen el mismo patrón: `pk_`, `fk_`, `uk_`, `ck_`, `ex_`
+(exclusión), `ix_` y `ux_` (índice único), seguidos del nombre de la tabla y de lo que controlan.
 
 <details>
 <summary><b>Catálogos</b> · cities, organization_categories, currencies</summary>
@@ -429,6 +548,7 @@ Catálogo de ciudades, con departamento.
 
 - UNIQUE `uk_cities_name_region`: `UNIQUE (name, region)`
 - CHECK `ck_cities_name`: `CHECK ((length(btrim(name)) > 0))`
+- CHECK `ck_cities_region`: `CHECK ((length(btrim(region)) > 0))`
 
 
 #### `organization_categories`
@@ -464,7 +584,9 @@ Monedas ISO 4217. La baja es lógica (active).
 
 #### `clients`
 
-Perfil del cliente (HU-001); id = auth.users.id de Supabase. Implementada por el equipo.
+Perfil del cliente (HU-001); id = auth.users.id de Supabase.
+
+*Sprint 2: normalizada: `city` pasa a `city_id`, fechas con zona, mayoría de edad por trigger.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
@@ -474,40 +596,47 @@ Perfil del cliente (HU-001); id = auth.users.id de Supabase. Implementada por el
 | `birth_date` | `date` | no |  |  |
 | `email` | `varchar(160)` | no |  | UNIQUE |
 | `phone` | `varchar(20)` | no |  |  |
-| `city` | `varchar(80)` | no |  |  |
+| `city_id` | `uuid` | no |  | FK → `cities` |
 | `notification_channel` | `varchar(20)` | no |  |  |
-| `status` | `varchar(30)` | no |  |  |
-| `created_at` | `timestamp(6)` | no |  |  |
-| `updated_at` | `timestamp(6)` | no |  |  |
+| `status` | `varchar(30)` | no | `'PENDING_VERIFICATION'` |  |
+| `created_at` | `timestamptz` | no | `now()` |  |
+| `updated_at` | `timestamptz` | no | `now()` |  |
 
-- CHECK `ck_clients_adult`: `CHECK ((birth_date <= (CURRENT_DATE - '18 years')))`
-- CHECK `ck_clients_email_formato`: `CHECK ((email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$'))`
+- CHECK `ck_clients_document`: `CHECK ((length(btrim(document)) > 0))`
+- CHECK `ck_clients_email`: `CHECK ((email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$'))`
+- CHECK `ck_clients_full_name`: `CHECK ((length(btrim(full_name)) > 0))`
 - CHECK `ck_clients_notification_channel`: `CHECK ((notification_channel IN ('EMAIL', 'SMS', 'WHATSAPP')))`
-- CHECK `ck_clients_phone_formato`: `CHECK ((phone ~ '^\+?[0-9]{7,15}$'))`
+- CHECK `ck_clients_phone`: `CHECK ((phone ~ '^\+?[0-9]{7,15}$'))`
 - CHECK `ck_clients_status`: `CHECK ((status IN ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED')))`
 - UNIQUE (índice) `ux_clients_email_lower`: `USING btree (lower(email))`
 
 
 #### `login_attempts`
 
-Intentos de ingreso para el bloqueo por cuenta (HU-021). Implementada por el equipo.
+Intentos de ingreso para el bloqueo por cuenta (HU-021).
+
+*Sprint 2: fecha con zona horaria.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
 | `id` | `bigint` | no | `generated by default as identity` | PK |
 | `email` | `varchar(160)` | no |  |  |
 | `success` | `boolean` | no |  |  |
-| `attempted_at` | `timestamp(6)` | no |  |  |
+| `attempted_at` | `timestamptz` | no | `now()` |  |
+
+- CHECK `ck_login_attempts_email`: `CHECK ((length(btrim(email)) > 0))`
 
 </details>
 
 <details>
-<summary><b>Organización</b> · organizations, organization_members, organization_policies, locations</summary>
+<summary><b>Organización</b> · organizations, organization_members, organization_policies, locations, organization_status_changes, client_status_changes</summary>
 
 
-#### `organizations` · cambió en el Sprint 2 (V4 del equipo)
+#### `organizations`
 
 Negocio proveedor (HU-002). PENDING_APPROVAL hasta que un administrador lo apruebe.
+
+*Sprint 2: V4 del equipo: tipo y número de identificación.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
@@ -530,6 +659,7 @@ Negocio proveedor (HU-002). PENDING_APPROVAL hasta que un administrador lo aprue
 - CHECK `ck_organizations_identification_number`: `CHECK ((length(btrim(identification_number)) > 0))`
 - CHECK `ck_organizations_identification_type`: `CHECK ((identification_type IN ('NIT', 'CC', 'CE', 'PASAPORTE')))`
 - CHECK `ck_organizations_name`: `CHECK ((length(btrim(name)) > 0))`
+- CHECK `ck_organizations_phone`: `CHECK ((contact_phone ~ '^\+?[0-9]{7,15}$'))`
 - CHECK `ck_organizations_status`: `CHECK ((status IN ('PENDING_APPROVAL', 'ACTIVE', 'SUSPENDED', 'REJECTED')))`
 
 
@@ -537,15 +667,16 @@ Negocio proveedor (HU-002). PENDING_APPROVAL hasta que un administrador lo aprue
 
 Quién trabaja en qué proveedor y con qué rol (ADR-0008).
 
+*Sprint 2: normalizada: PK natural `(organization_id, user_id)`.*
+
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
-| `id` | `uuid` | no | `gen_random_uuid()` | PK |
-| `organization_id` | `uuid` | no |  | FK → `organizations` |
-| `user_id` | `uuid` | no |  |  |
+| `organization_id` | `uuid` | no |  | PK, FK → `organizations` |
+| `user_id` | `uuid` | no |  | PK |
 | `role` | `varchar(30)` | no |  |  |
 | `created_at` | `timestamptz` | no | `now()` |  |
 
-- UNIQUE `uk_organization_members`: `UNIQUE (organization_id, user_id)`
+- PK `pk_organization_members`: `PRIMARY KEY (organization_id, user_id)`
 - CHECK `ck_organization_members_role`: `CHECK ((role IN ('OWNER', 'MANAGER', 'STAFF')))`
 
 
@@ -565,10 +696,9 @@ Reglas de anticipación y cancelación, versionadas (HU-002).
 | `replaced_at` | `timestamptz` | sí |  |  |
 
 - EXCLUDE `ex_organization_policies_solape`: `EXCLUDE USING gist (organization_id WITH =, tstzrange(effective_from, replaced_at) WITH &&)`
-- UNIQUE `uk_organization_policies_id_org`: `UNIQUE (id, organization_id)`
 - UNIQUE `uk_organization_policies_version`: `UNIQUE (organization_id, version)`
 - CHECK `ck_organization_policies_cancel`: `CHECK ((free_cancellation_window_minutes >= 0))`
-- CHECK `ck_organization_policies_notice`: `CHECK (((booking_notice_minutes_min >= 0) AND (booking_notice_minutes_max >= 0) AND (booking_notice_minutes_min <= booking_notice_minutes_max)))`
+- CHECK `ck_organization_policies_notice`: `CHECK (((booking_notice_minutes_min >= 0) AND (booking_notice_minutes_min <= booking_notice_minutes_max)))`
 - CHECK `ck_organization_policies_version`: `CHECK ((version > 0))`
 - CHECK `ck_organization_policies_vigencia`: `CHECK (((replaced_at IS NULL) OR (replaced_at > effective_from)))`
 - UNIQUE (índice) `ux_organization_policies_vigente`: `USING btree (organization_id) WHERE (replaced_at IS NULL)`
@@ -590,10 +720,54 @@ Sedes de un proveedor.
 | `created_at` | `timestamptz` | no | `now()` |  |
 | `updated_at` | `timestamptz` | no | `now()` |  |
 
-- UNIQUE `uk_locations_id_org`: `UNIQUE (id, organization_id)`
 - UNIQUE `uk_locations_org_name`: `UNIQUE (organization_id, name)`
+- CHECK `ck_locations_address`: `CHECK ((length(btrim(address)) > 0))`
 - CHECK `ck_locations_name`: `CHECK ((length(btrim(name)) > 0))`
 - CHECK `ck_locations_status`: `CHECK ((status IN ('ACTIVE', 'INACTIVE')))`
+
+
+#### `organization_status_changes`
+
+Historia de estados de un proveedor, con motivo obligatorio (HU-003).
+
+*Sprint 2: normalizada: sale de `account_status_changes`.*
+
+| Columna | Tipo | Nulo | Default | Clave |
+|---|---|---|---|---|
+| `id` | `uuid` | no | `gen_random_uuid()` | PK |
+| `organization_id` | `uuid` | no |  | FK → `organizations` |
+| `from_status` | `varchar(30)` | sí |  |  |
+| `to_status` | `varchar(30)` | no |  |  |
+| `reason` | `varchar(500)` | no |  |  |
+| `affected_bookings` | `integer` | no | `0` |  |
+| `changed_by` | `uuid` | sí |  |  |
+| `changed_at` | `timestamptz` | no | `now()` |  |
+
+- CHECK `ck_organization_status_changes_count`: `CHECK ((affected_bookings >= 0))`
+- CHECK `ck_organization_status_changes_from`: `CHECK (((from_status IS NULL) OR (from_status IN ('PENDING_APPROVAL', 'ACTIVE', 'SUSPENDED', 'REJECTED'))))`
+- CHECK `ck_organization_status_changes_reason`: `CHECK ((length(btrim(reason)) > 0))`
+- CHECK `ck_organization_status_changes_to`: `CHECK ((to_status IN ('PENDING_APPROVAL', 'ACTIVE', 'SUSPENDED', 'REJECTED')))`
+
+
+#### `client_status_changes`
+
+Historia de estados de un cliente, con motivo obligatorio (HU-003).
+
+*Sprint 2: normalizada: sale de `account_status_changes`.*
+
+| Columna | Tipo | Nulo | Default | Clave |
+|---|---|---|---|---|
+| `id` | `uuid` | no | `gen_random_uuid()` | PK |
+| `client_id` | `uuid` | no |  | FK → `clients` |
+| `from_status` | `varchar(30)` | sí |  |  |
+| `to_status` | `varchar(30)` | no |  |  |
+| `reason` | `varchar(500)` | no |  |  |
+| `changed_by` | `uuid` | sí |  |  |
+| `changed_at` | `timestamptz` | no | `now()` |  |
+
+- CHECK `ck_client_status_changes_from`: `CHECK (((from_status IS NULL) OR (from_status IN ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED'))))`
+- CHECK `ck_client_status_changes_reason`: `CHECK ((length(btrim(reason)) > 0))`
+- CHECK `ck_client_status_changes_to`: `CHECK ((to_status IN ('PENDING_VERIFICATION', 'ACTIVE', 'SUSPENDED')))`
 
 </details>
 
@@ -601,9 +775,11 @@ Sedes de un proveedor.
 <summary><b>Servicios y recursos</b> · services, service_locations, resource_types, service_resource_requirements, resources, resource_maintenances</summary>
 
 
-#### `services` · cambió en el Sprint 2 (V3 del equipo)
+#### `services`
 
 Servicios ofertados (HU-004). customer_capacity 1 = individual, > 1 = grupal.
+
+*Sprint 2: V3 del equipo: nace `INACTIVE`.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
@@ -621,7 +797,6 @@ Servicios ofertados (HU-004). customer_capacity 1 = individual, > 1 = grupal.
 | `created_at` | `timestamptz` | no | `now()` |  |
 | `updated_at` | `timestamptz` | no | `now()` |  |
 
-- UNIQUE `uk_services_id_org`: `UNIQUE (id, organization_id)`
 - UNIQUE `uk_services_org_name`: `UNIQUE (organization_id, name)`
 - CHECK `ck_services_capacity`: `CHECK ((customer_capacity >= 1))`
 - CHECK `ck_services_duration`: `CHECK ((duration_minutes > 0))`
@@ -635,15 +810,14 @@ Servicios ofertados (HU-004). customer_capacity 1 = individual, > 1 = grupal.
 
 En qué sedes se presta cada servicio (HU-004).
 
+*Sprint 2: normalizada: sin `organization_id`.*
+
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
-| `service_id` | `uuid` | no |  | PK |
-| `location_id` | `uuid` | no |  | PK |
-| `organization_id` | `uuid` | no |  |  |
+| `service_id` | `uuid` | no |  | PK, FK → `services` |
+| `location_id` | `uuid` | no |  | PK, FK → `locations` |
 
 - PK `pk_service_locations`: `PRIMARY KEY (service_id, location_id)`
-- FK `fk_service_locations_loc`: `FOREIGN KEY (location_id, organization_id) REFERENCES locations(id, organization_id) ON DELETE CASCADE`
-- FK `fk_service_locations_svc`: `FOREIGN KEY (service_id, organization_id) REFERENCES services(id, organization_id) ON DELETE CASCADE`
 
 
 #### `resource_types`
@@ -658,36 +832,35 @@ Tipos de recurso no consumible: sala, silla, especialista.
 | `description` | `varchar(300)` | sí |  |  |
 | `created_at` | `timestamptz` | no | `now()` |  |
 
-- UNIQUE `uk_resource_types_id_org`: `UNIQUE (id, organization_id)`
 - UNIQUE `uk_resource_types_org_name`: `UNIQUE (organization_id, name)`
+- CHECK `ck_resource_types_name`: `CHECK ((length(btrim(name)) > 0))`
 
 
 #### `service_resource_requirements`
 
 Cuántos recursos de cada tipo exige un servicio.
 
+*Sprint 2: normalizada: sin `id` ni `organization_id`, PK natural.*
+
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
-| `id` | `uuid` | no | `gen_random_uuid()` | PK |
-| `service_id` | `uuid` | no |  |  |
-| `resource_type_id` | `uuid` | no |  |  |
-| `organization_id` | `uuid` | no |  |  |
+| `service_id` | `uuid` | no |  | PK, FK → `services` |
+| `resource_type_id` | `uuid` | no |  | PK, FK → `resource_types` |
 | `quantity_required` | `integer` | no | `1` |  |
 
-- UNIQUE `uk_service_resource_req`: `UNIQUE (service_id, resource_type_id)`
-- FK `fk_service_resource_req_svc`: `FOREIGN KEY (service_id, organization_id) REFERENCES services(id, organization_id) ON DELETE CASCADE`
-- FK `fk_service_resource_req_type`: `FOREIGN KEY (resource_type_id, organization_id) REFERENCES resource_types(id, organization_id) ON DELETE RESTRICT`
-- CHECK `ck_service_resource_req_qty`: `CHECK ((quantity_required > 0))`
+- PK `pk_service_resource_requirements`: `PRIMARY KEY (service_id, resource_type_id)`
+- CHECK `ck_service_resource_requirements_qty`: `CHECK ((quantity_required > 0))`
 
 
-#### `resources` · cambió en el Sprint 2 (V7 del equipo)
+#### `resources`
 
 Recurso concreto en una sede, con capacidad y estado (HU-009).
 
+*Sprint 2: V7 del equipo: capacidad y estado; normalizada: sin `organization_id`.*
+
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
 | `id` | `uuid` | no | `gen_random_uuid()` | PK |
-| `organization_id` | `uuid` | no |  |  |
 | `resource_type_id` | `uuid` | no |  | FK → `resource_types` |
 | `location_id` | `uuid` | no |  | FK → `locations` |
 | `name` | `varchar(120)` | no |  |  |
@@ -698,15 +871,16 @@ Recurso concreto en una sede, con capacidad y estado (HU-009).
 
 - UNIQUE `uk_resources_id_location`: `UNIQUE (id, location_id)`
 - UNIQUE `uk_resources_location_name`: `UNIQUE (location_id, name)`
-- FK `fk_resources_location_org`: `FOREIGN KEY (location_id, organization_id) REFERENCES locations(id, organization_id) ON DELETE RESTRICT`
-- FK `fk_resources_type_org`: `FOREIGN KEY (resource_type_id, organization_id) REFERENCES resource_types(id, organization_id) ON DELETE RESTRICT`
 - CHECK `ck_resources_capacity`: `CHECK ((capacity >= 1))`
+- CHECK `ck_resources_name`: `CHECK ((length(btrim(name)) > 0))`
 - CHECK `ck_resources_status`: `CHECK ((status IN ('ACTIVE', 'RETIRED')))`
 
 
-#### `resource_maintenances` · cambió en el Sprint 2 (V7 del equipo)
+#### `resource_maintenances`
 
 Periodos de mantenimiento: el recurso no genera disponibilidad (HU-009).
+
+*Sprint 2: V7 del equipo.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
@@ -726,16 +900,17 @@ Periodos de mantenimiento: el recurso no genera disponibilidad (HU-009).
 <summary><b>Agendas</b> · agendas, agenda_services, schedules, agenda_exceptions</summary>
 
 
-#### `agendas` · cambió en el Sprint 2 (V8 del equipo)
+#### `agendas`
 
 Agenda de una sede o de un recurso: granularidad, vigencia y servicios (HU-006).
+
+*Sprint 2: V8 del equipo; normalizada: sin `organization_id`.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
 | `id` | `uuid` | no | `gen_random_uuid()` | PK |
-| `organization_id` | `uuid` | no |  |  |
-| `location_id` | `uuid` | no |  |  |
-| `resource_id` | `uuid` | sí |  |  |
+| `location_id` | `uuid` | no |  | FK → `locations`, FK compuesta → `resources` |
+| `resource_id` | `uuid` | sí |  | FK compuesta → `resources` |
 | `name` | `varchar(120)` | no |  |  |
 | `slot_minutes` | `smallint` | no |  |  |
 | `valid_from` | `date` | no |  |  |
@@ -744,33 +919,32 @@ Agenda de una sede o de un recurso: granularidad, vigencia y servicios (HU-006).
 | `updated_at` | `timestamptz` | no | `now()` |  |
 
 - EXCLUDE `ex_agendas_solape`: `EXCLUDE USING gist (location_id WITH =, COALESCE(resource_id, '00000000-0000-0000-0000-000000000000') WITH =, daterange(valid_from, valid_until, '[]') WITH &&)`
-- UNIQUE `uk_agendas_id_location`: `UNIQUE (id, location_id)`
-- UNIQUE `uk_agendas_org_name`: `UNIQUE (organization_id, name)`
-- FK `fk_agendas_location_org`: `FOREIGN KEY (location_id, organization_id) REFERENCES locations(id, organization_id) ON DELETE RESTRICT`
+- UNIQUE `uk_agendas_location_name`: `UNIQUE (location_id, name)`
 - FK `fk_agendas_resource`: `FOREIGN KEY (resource_id, location_id) REFERENCES resources(id, location_id) ON DELETE RESTRICT`
 - CHECK `ck_agendas_name`: `CHECK ((length(btrim(name)) > 0))`
 - CHECK `ck_agendas_slot`: `CHECK ((slot_minutes IN (15, 30, 60)))`
 - CHECK `ck_agendas_vigencia`: `CHECK (((valid_until IS NULL) OR (valid_until >= valid_from)))`
 
 
-#### `agenda_services` · cambió en el Sprint 2 (V8 del equipo)
+#### `agenda_services`
 
 Servicios reservables en una agenda (HU-006).
 
+*Sprint 2: V8 del equipo; normalizada: sin `location_id`.*
+
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
-| `agenda_id` | `uuid` | no |  | PK |
-| `service_id` | `uuid` | no |  | PK |
-| `location_id` | `uuid` | no |  |  |
+| `agenda_id` | `uuid` | no |  | PK, FK → `agendas` |
+| `service_id` | `uuid` | no |  | PK, FK → `services` |
 
 - PK `pk_agenda_services`: `PRIMARY KEY (agenda_id, service_id)`
-- FK `fk_agenda_services_agenda`: `FOREIGN KEY (agenda_id, location_id) REFERENCES agendas(id, location_id) ON DELETE CASCADE`
-- FK `fk_agenda_services_service`: `FOREIGN KEY (service_id, location_id) REFERENCES service_locations(service_id, location_id) ON DELETE CASCADE`
 
 
-#### `schedules` · cambió en el Sprint 2 (V8 del equipo)
+#### `schedules`
 
 Bloques horarios semanales de una agenda (HU-006).
+
+*Sprint 2: V8 del equipo: bloques de una agenda.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
@@ -808,38 +982,37 @@ Festivos, cierres y jornadas recortadas de una agenda.
 </details>
 
 <details>
-<summary><b>Reservas</b> · bookings, booking_resources, booking_status_changes, account_status_changes, booking_reviews, waitlist_entries, payments</summary>
+<summary><b>Reservas y pagos</b> · bookings, booking_resources, booking_status_changes, booking_reviews, waitlist_entries, payments</summary>
 
 
 #### `bookings`
 
-Reserva. policy_id congela las condiciones vigentes al crearla (HU-002).
+Reserva. policy_id y currency_id congelan las condiciones y la moneda al crearla.
+
+*Sprint 2: normalizada: sin `organization_id`, con `currency_id`.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
 | `id` | `uuid` | no | `gen_random_uuid()` | PK |
 | `client_id` | `uuid` | no |  | FK → `clients` |
-| `organization_id` | `uuid` | no |  |  |
-| `service_id` | `uuid` | no |  |  |
-| `location_id` | `uuid` | no |  |  |
-| `policy_id` | `uuid` | no |  |  |
+| `service_id` | `uuid` | no |  | FK compuesta → `service_locations` |
+| `location_id` | `uuid` | no |  | FK compuesta → `service_locations` |
+| `policy_id` | `uuid` | no |  | FK → `organization_policies` |
 | `session_id` | `uuid` | no |  |  |
 | `starts_at` | `timestamptz` | no |  |  |
 | `ends_at` | `timestamptz` | no |  |  |
 | `attendees` | `integer` | no | `1` |  |
 | `total_price` | `numeric(12,2)` | no |  |  |
+| `currency_id` | `uuid` | no |  | FK → `currencies` |
 | `status` | `varchar(20)` | no | `'RESERVED'` |  |
 | `cancelled_at` | `timestamptz` | sí |  |  |
 | `created_at` | `timestamptz` | no | `now()` |  |
 | `updated_at` | `timestamptz` | no | `now()` |  |
 
-- UNIQUE `uk_bookings_snapshot`: `UNIQUE (id, starts_at, ends_at, status)`
-- FK `fk_bookings_location_org`: `FOREIGN KEY (location_id, organization_id) REFERENCES locations(id, organization_id) ON DELETE RESTRICT`
-- FK `fk_bookings_policy_org`: `FOREIGN KEY (policy_id, organization_id) REFERENCES organization_policies(id, organization_id) ON DELETE RESTRICT`
+- UNIQUE `uk_bookings_snapshot`: `UNIQUE (id, session_id, starts_at, ends_at, status)`
 - FK `fk_bookings_service_location`: `FOREIGN KEY (service_id, location_id) REFERENCES service_locations(service_id, location_id) ON DELETE RESTRICT`
-- FK `fk_bookings_service_org`: `FOREIGN KEY (service_id, organization_id) REFERENCES services(id, organization_id) ON DELETE RESTRICT`
 - CHECK `ck_bookings_attendees`: `CHECK ((attendees > 0))`
-- CHECK `ck_bookings_cancel`: `CHECK (((status <> 'CANCELLED') OR (cancelled_at IS NOT NULL)))`
+- CHECK `ck_bookings_cancel`: `CHECK (((status = 'CANCELLED') = (cancelled_at IS NOT NULL)))`
 - CHECK `ck_bookings_price`: `CHECK ((total_price >= (0)))`
 - CHECK `ck_bookings_rango`: `CHECK ((ends_at > starts_at))`
 - CHECK `ck_bookings_status`: `CHECK ((status IN ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW')))`
@@ -849,22 +1022,20 @@ Reserva. policy_id congela las condiciones vigentes al crearla (HU-002).
 
 Recursos ocupados por una reserva; el EXCLUDE impide la sobreocupación.
 
+*Sprint 2: normalizada: sin `location_id`; la FK también sincroniza `session_id`.*
+
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
-| `booking_id` | `uuid` | no |  | PK |
-| `resource_id` | `uuid` | no |  | PK |
-| `location_id` | `uuid` | no |  |  |
-| `session_id` | `uuid` | no |  |  |
-| `starts_at` | `timestamptz` | no |  |  |
-| `ends_at` | `timestamptz` | no |  |  |
-| `status` | `varchar(20)` | no |  |  |
+| `booking_id` | `uuid` | no |  | PK, FK compuesta → `bookings` |
+| `resource_id` | `uuid` | no |  | PK, FK → `resources` |
+| `session_id` | `uuid` | no |  | FK compuesta → `bookings` |
+| `starts_at` | `timestamptz` | no |  | FK compuesta → `bookings` |
+| `ends_at` | `timestamptz` | no |  | FK compuesta → `bookings` |
+| `status` | `varchar(20)` | no |  | FK compuesta → `bookings` |
 
 - EXCLUDE `ex_booking_resources_solape`: `EXCLUDE USING gist (resource_id WITH =, session_id WITH <>, tstzrange(starts_at, ends_at) WITH &&) WHERE ((status IN ('RESERVED', 'CONFIRMED')))`
 - PK `pk_booking_resources`: `PRIMARY KEY (booking_id, resource_id)`
-- FK `fk_booking_resources_bkg`: `FOREIGN KEY (booking_id, starts_at, ends_at, status) REFERENCES bookings(id, starts_at, ends_at, status) ON UPDATE CASCADE ON DELETE CASCADE`
-- FK `fk_booking_resources_res`: `FOREIGN KEY (resource_id, location_id) REFERENCES resources(id, location_id) ON DELETE RESTRICT`
-- CHECK `ck_booking_resources_rango`: `CHECK ((ends_at > starts_at))`
-- CHECK `ck_booking_resources_status`: `CHECK ((status IN ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW')))`
+- FK `fk_booking_resources_booking`: `FOREIGN KEY (booking_id, session_id, starts_at, ends_at, status) REFERENCES bookings(id, session_id, starts_at, ends_at, status) ON UPDATE CASCADE ON DELETE CASCADE`
 
 
 #### `booking_status_changes`
@@ -881,31 +1052,10 @@ Historia de estados de una reserva.
 | `changed_by` | `uuid` | sí |  |  |
 | `changed_at` | `timestamptz` | no | `now()` |  |
 
-- CHECK `ck_bsc_from`: `CHECK (((from_status IS NULL) OR (from_status IN ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW'))))`
-- CHECK `ck_bsc_reason`: `CHECK (((to_status <> 'CANCELLED') OR (length(btrim((COALESCE(reason, '')))) > 0)))`
-- CHECK `ck_bsc_to`: `CHECK ((to_status IN ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW')))`
-
-
-#### `account_status_changes`
-
-Historia de estados de cuentas, con motivo obligatorio (HU-003).
-
-| Columna | Tipo | Nulo | Default | Clave |
-|---|---|---|---|---|
-| `id` | `uuid` | no | `gen_random_uuid()` | PK |
-| `subject_type` | `varchar(20)` | no |  |  |
-| `client_id` | `uuid` | sí |  | FK → `clients` |
-| `organization_id` | `uuid` | sí |  | FK → `organizations` |
-| `from_status` | `varchar(30)` | sí |  |  |
-| `to_status` | `varchar(30)` | no |  |  |
-| `reason` | `varchar(500)` | no |  |  |
-| `affected_bookings` | `integer` | no | `0` |  |
-| `changed_by` | `uuid` | sí |  |  |
-| `changed_at` | `timestamptz` | no | `now()` |  |
-
-- CHECK `ck_account_status_changes_count`: `CHECK ((affected_bookings >= 0))`
-- CHECK `ck_account_status_changes_reason`: `CHECK ((length(btrim(reason)) > 0))`
-- CHECK `ck_account_status_changes_subject`: `CHECK ((((subject_type = 'CLIENT') AND (client_id IS NOT NULL) AND (organization_id IS NULL)) OR ((subject_type = 'ORGANIZATION') AND (organization_id IS NOT NULL) AND (client_id IS NULL))))`
+- CHECK `ck_booking_status_changes_cambio`: `CHECK ((from_status IS DISTINCT FROM (to_status)))`
+- CHECK `ck_booking_status_changes_from`: `CHECK (((from_status IS NULL) OR (from_status IN ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW'))))`
+- CHECK `ck_booking_status_changes_reason`: `CHECK (((to_status <> 'CANCELLED') OR (length(btrim((COALESCE(reason, '')))) > 0)))`
+- CHECK `ck_booking_status_changes_to`: `CHECK ((to_status IN ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW')))`
 
 
 #### `booking_reviews` · **[S2 nueva]**
@@ -933,8 +1083,8 @@ Lista de espera por servicio, sede y día.
 |---|---|---|---|---|
 | `id` | `uuid` | no | `gen_random_uuid()` | PK |
 | `client_id` | `uuid` | no |  | FK → `clients` |
-| `service_id` | `uuid` | no |  |  |
-| `location_id` | `uuid` | no |  |  |
+| `service_id` | `uuid` | no |  | FK compuesta → `service_locations` |
+| `location_id` | `uuid` | no |  | FK compuesta → `service_locations` |
 | `desired_date` | `date` | no |  |  |
 | `attendees` | `integer` | no | `1` |  |
 | `status` | `varchar(20)` | no | `'WAITING'` |  |
@@ -982,9 +1132,11 @@ Pagos y reembolsos de una reserva.
 <summary><b>Notificaciones, reportes y auditoría</b> · sent_emails, resource_occupancy_daily, audit_log</summary>
 
 
-#### `sent_emails` · cambió en el Sprint 2 (V6 del equipo)
+#### `sent_emails`
 
 Correos guardados en vez de enviados por SMTP (ADR-0007).
+
+*Sprint 2: V6 del equipo.*
 
 | Columna | Tipo | Nulo | Default | Clave |
 |---|---|---|---|---|
@@ -994,7 +1146,7 @@ Correos guardados en vez de enviados por SMTP (ADR-0007).
 | `body` | `text` | no |  |  |
 | `sent_at` | `timestamptz` | no | `now()` |  |
 
-- CHECK `ck_sent_emails_recipient`: `CHECK ((length(btrim(recipient)) > 0))`
+- CHECK `ck_sent_emails_recipient`: `CHECK ((recipient ~* '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$'))`
 - CHECK `ck_sent_emails_subject`: `CHECK ((length(btrim(subject)) > 0))`
 
 
@@ -1039,7 +1191,40 @@ Auditoría de cambios en tablas sensibles, escrita por trigger.
 
 ### Normalización
 
-Las seis tablas nuevas están en BCNF, salvo `audit_log`, que explico abajo:
+**28 de las 30 tablas están en BCNF.** Las otras dos se quedan por debajo a propósito, y por la
+misma razón: un `EXCLUDE` de PostgreSQL sólo compara columnas de la misma fila, así que el dato que
+necesita tiene que estar ahí.
+
+| Tabla | Dependencia que queda | Por qué se deja |
+|---|---|---|
+| `booking_resources` | `booking_id → session_id, starts_at, ends_at, status`: parcial respecto a la PK `(booking_id, resource_id)`, rompe 2FN | El `EXCLUDE` que impide que un recurso atienda dos sesiones a la vez necesita el rango en la fila. La FK compuesta contra `uk_bookings_snapshot`, con `on update cascade`, hace que la copia no pueda desviarse del original |
+| `agendas` | `resource_id → location_id`, cuando la agenda es de un recurso. `resource_id` no es superclave, así que rompe BCNF; sigue en 3FN porque `location_id` es parte de la clave candidata `(location_id, name)` | El `EXCLUDE` que impide dos agendas vigentes en la misma sede necesita `location_id`. La FK compuesta `(resource_id, location_id)` contra `resources` impide que no coincida |
+
+Así que `agendas` queda en 3FN y `booking_resources` en 1FN. La segunda es una desnormalización
+controlada: la redundancia existe, pero el motor no deja que produzca una anomalía de actualización.
+Es la misma decisión del Sprint 1, ahora reducida al mínimo: antes la tabla también repetía
+`location_id`.
+
+**Lo que quité y cómo se garantiza ahora.** En el Sprint 1 había cinco redundancias más. Todas
+existían para lo mismo, impedir que se mezclaran datos de dos proveedores, y las quité:
+
+| Tabla | Dependencia que rompía la forma normal | La regla ahora la cumple |
+|---|---|---|
+| `service_locations` | `service_id → organization_id`: parcial, 2FN | `tg_service_locations_mismo_proveedor` |
+| `service_resource_requirements` | `service_id → organization_id`: parcial, 2FN | `tg_service_resource_requirements_mismo_proveedor` |
+| `agenda_services` | `agenda_id → location_id`: parcial, 2FN | `tg_agenda_services_en_sede` |
+| `resources` | `location_id → organization_id`: transitiva, 3FN | `tg_resources_mismo_proveedor` |
+| `agendas` | `location_id → organization_id`: transitiva, 3FN | sale de la sede; no hace falta regla |
+| `bookings` | `service_id → organization_id`: transitiva, 3FN | `tg_bookings_coherencia` (la política es del proveedor del servicio) |
+| `booking_resources` | `resource_id → location_id`: parcial, 2FN | `tg_booking_resources_en_sede` |
+
+Es un intercambio y lo hice a conciencia. Una FK compuesta es declarativa y no se puede saltar; un
+trigger es código. A cambio, el modelo queda en la forma que pide el curso, cada dato vive en un solo
+lugar, y cada trigger es una consulta de una línea. Las pruebas 18 a 24 de
+[`pruebas-integridad.sql`](pruebas-integridad.sql) intentan romper cada regla, y la base las rechaza
+todas.
+
+**Las tablas nuevas:**
 
 | Tabla | Dependencias funcionales | Forma | Por qué |
 |---|---|---|---|
@@ -1047,54 +1232,39 @@ Las seis tablas nuevas están en BCNF, salvo `audit_log`, que explico abajo:
 | `booking_reviews` | `id → todo`; `booking_id → todo` | BCNF | Las dos son claves candidatas. No guarda cliente ni servicio: saldrían de `booking_id` y serían transitivas |
 | `waitlist_entries` | `id → todo` | BCNF | No guarda `organization_id`: `service_id → organization_id` la haría transitiva |
 | `payments` | `id → todo`; `external_reference → todo` | BCNF | `amount` y `currency_id` no se derivan de la reserva: son lo que cobró la pasarela, y una tarjeta internacional se cobra en otra moneda |
-| `resource_occupancy_daily` | `(resource_id, occupancy_date) → minutos, reservas` | BCNF | Dentro de la tabla todo depende de la clave completa |
+| `resource_occupancy_daily` | `(resource_id, occupancy_date) → minutos, reservas` | BCNF | Todo depende de la clave completa |
 | `audit_log` | `id → todo` | no está en 1FN, a propósito | Ver abajo |
 
-Las 23 tablas del equipo están en 3FN salvo cinco redundancias que vienen del Sprint 1 y que el motor
-mantiene consistentes:
-
-| Tabla | Dependencia que rompe la forma normal | Por qué se deja |
-|---|---|---|
-| `booking_resources` | `booking_id → starts_at, ends_at, status, session_id` y `resource_id → location_id`: parciales, rompe 2FN | Un `EXCLUDE` no ve a través de un join; la copia la sincroniza una FK compuesta con `on update cascade` |
-| `service_locations` | `service_id → organization_id`: parcial, rompe 2FN | Las FK compuestas `(service_id, organization_id)` y `(location_id, organization_id)` impiden publicar un servicio en la sede de otro proveedor |
-| `agenda_services` | `agenda_id → location_id`: parcial, rompe 2FN | La FK contra `service_locations` exige que el servicio se preste en la sede de la agenda |
-| `bookings` | `service_id → organization_id`: transitiva, rompe 3FN | Las FK compuestas obligan a que servicio, sede y política sean del mismo proveedor |
-| `resources` | `location_id → organization_id`: transitiva, rompe 3FN | Lo mismo para el tipo de recurso y la sede (V7 del equipo) |
-
-En las cinco, la columna repetida es el destino de una FK compuesta, así que el motor no deja que se
-desvíe de su original. La redundancia está, pero no puede generar una anomalía de actualización.
-
-**Las redundancias de las tablas nuevas, y por qué.**
+Dos decisiones más:
 
 - `resource_occupancy_daily` es un dato derivado: se podría calcular desde las reservas y las agendas.
   La guardo igual, como en un data mart, porque el reporte de un mes por recurso pasa de recorrer
   todas las reservas a leer 30 filas. La llena `fn_calcular_ocupacion`, que reescribe el día
   completo, y rol_app sólo tiene permiso de leerla.
-- `audit_log.old_data` y `new_data` son `jsonb`, que no es atómico. Es una excepción a 1FN a
-  propósito: guardan la foto de una fila de cualquier tabla, y una columna por cada columna de cada
-  tabla auditada no tendría sentido. Nadie consulta el negocio desde ahí, sólo quién cambió qué.
+- `audit_log.old_data` y `new_data` son `jsonb`, que no es atómico. Guardan la foto de una fila de
+  cualquier tabla, y una columna por cada columna de cada tabla auditada no tendría sentido. Nadie
+  consulta el negocio desde ahí, sólo quién cambió qué.
 
-**Lo que dejo anotado para el equipo, sin tocarlo.** `clients.city` es texto libre aunque existe el
-catálogo `cities`. Dos clientes de "Medellin" y "Medellín" quedan como ciudades distintas. Pasarlo a
-una FK cambia la entidad JPA del equipo, así que es una propuesta para el siguiente sprint, no un
-cambio de esta entrega.
+Los estados (`status`, `role`, `method`) son `varchar` con `CHECK` y no tablas de catálogo. Son listas
+cerradas que cambian con el código y no con los datos, así que una tabla aparte sólo agregaría un join.
 
 ## 3. schema.sql
 
 Está ordenado por dependencias: catálogos, identidad, organización, servicios y recursos, agendas,
 reservas, notificaciones, reportes y auditoría. Después vienen las funciones, los triggers, los
-índices, los comentarios y, al final, la seguridad. Cada cambio del equipo dice de qué migración
-viene, y cada tabla mía dice `[S2 nueva]`.
+índices, los comentarios y, al final, la seguridad. Cada tabla nueva dice `[S2 nueva]` y cada
+decisión de normalización está comentada donde se toma.
 
 Lo probé así:
 
-- Contra un PostgreSQL 16 vacío corre sin errores y crea 29 tablas, 40 FK, 68 CHECK, 6 EXCLUDE,
-  91 índices y 20 triggers, con RLS activo en todas.
+- Contra un PostgreSQL 16 vacío corre sin errores y crea 30 tablas, 38 FK, 78 CHECK, 6 EXCLUDE,
+  84 índices y 28 triggers, con RLS activo en todas.
+- Ninguna restricción ni índice se sale de la convención de nombres. Lo verifiqué contra el catálogo.
 - Contra una base con los roles de Supabase (`anon`, `authenticated` y `auth.uid()`) crea además las
   políticas del Data API.
-- `seed.sql`, las 24 consultas y las 25 pruebas de integridad corren encima. Las pruebas fallan cada
-  una por la regla que les corresponde, y la parte de lo permitido pasa sin errores.
-- El catálogo de las 23 tablas del equipo coincide con el de sus migraciones, como dije arriba.
+- `seed.sql`, las 24 consultas y las 34 pruebas de integridad corren encima. Cada prueba falla por la
+  regla que le corresponde, y la parte de lo permitido pasa sin errores.
+- `docker compose up` deja el contenedor `healthy` con todo cargado.
 
 Al final del archivo hay una lista de lo que el esquema **no** garantiza. Por ejemplo, que una reserva
 caiga dentro de un bloque de agenda: eso lo valida el backend al ofrecer franjas.
@@ -1103,9 +1273,8 @@ caiga dentro de un bloque de agenda: eso lo valida el backend al ofrecer franjas
 
 Todas están en [`consultas.sql`](consultas.sql), cada una con la pregunta que responde, y todas
 devuelven filas con `seed.sql`. El archivo usa `\echo` para titular cada resultado, así que se corre
-con `psql -f` y no en el editor SQL de Supabase. Las del Sprint 1 son las mismas de esa entrega: el equipo ya las había
-ajustado a sus migraciones (la 5 usa el nuevo `identification_number` y la 6 lee los bloques desde la
-agenda).
+con `psql -f` y no en el editor SQL de Supabase. Las del Sprint 1 son las mismas de esa entrega,
+ajustadas al modelo actual.
 
 | # | Pregunta | Cómo | HU |
 |---|---|---|---|
@@ -1118,7 +1287,7 @@ agenda).
 | 6 | ¿Qué agenda tiene cada recurso pasado mañana y cuánta carga lleva? | `left join`, agregación | 006 |
 | 7 | ¿Qué proveedores llevan más tiempo esperando aprobación? | filtro, antigüedad | 003 |
 | 8 | ¿Está bloqueada una cuenta por intentos fallidos? | agregación con ventana de tiempo | 021 |
-| 9 | ¿Qué clientes llevan más de 24 h sin verificar el correo? | filtro de tiempo | 001 |
+| 9 | ¿Qué clientes llevan más de 24 h sin verificar el correo? | join, filtro de tiempo | 001 |
 | 10 | ¿Qué condiciones de cancelación rigen para cada reserva? | join, `case` | 002 |
 | 11 | ¿El correo, el documento o el NIT ya están registrados? | `exists` | 001, 002 |
 | 12 | ¿Qué clientes se registraron y nunca han reservado? | `not exists` correlacionado | 001 |
@@ -1209,8 +1378,9 @@ activos**. Cada proveedor tiene en promedio 1,5 sedes, 8 servicios y 6 recursos 
 alta cada una). En total 3 691 640. En el mes 12: 2 × 214 200 + 2 × 3 000 + 2 × 320 + 3 × 40 +
 2 × 40 + 2 × 40 + 30 600 = 465 920.
 
-Los catálogos (`cities`, `organization_categories`, `currencies`) quedan por debajo de 100 filas y
-casi no crecen.
+Las historias de estado de cuentas (`organization_status_changes`, `client_status_changes`) y los
+catálogos (`cities`, `organization_categories`, `currencies`) quedan por debajo de unos pocos miles de
+filas al año.
 
 `bookings` termina el año con 1,58 millones de filas y unos 288 MB según la fórmula del curso. Medido
 en PostgreSQL son 309 MB. Lo crucé generando ese volumen con
@@ -1248,8 +1418,8 @@ S = select, I = insert, U = update, D = delete.
 | `bookings`, `waitlist_entries` | todo | S I U | S | S, sólo las propias | — |
 | `booking_reviews` | todo | S I U | S, sin el comentario | S, sólo las propias | — |
 | `booking_resources`, `payments` | todo | S I U | S | — | — |
-| Historiales: `booking_status_changes`, `account_status_changes` | todo | S I | S | — | — |
-| `login_attempts`, `sent_emails` | todo | S I | — | — | — |
+| Historiales: `booking_status_changes`, `organization_status_changes` | todo | S I | S | — | — |
+| `client_status_changes`, `login_attempts`, `sent_emails` | todo | S I | — | — | — |
 | `resource_occupancy_daily` | todo | S | S | — | — |
 | `audit_log` | todo | — | — | — | — |
 
@@ -1265,16 +1435,16 @@ Por qué está así:
 - **Los catálogos se cargan por migración** (V5 del equipo). La aplicación sólo los lee.
 - **audit_log no la toca nadie más que el administrador.** La escribe el trigger `fn_auditar`, que es
   `security definer`. Así rol_app deja rastro de sus cambios sin poder leer ni borrar ese rastro.
-- **rol_lectura no ve datos personales.** No lee `clients`, `sent_emails` ni `login_attempts`. De
-  `organizations` no ve el documento, el correo ni el teléfono, porque desde V4 un proveedor puede ser
-  una persona natural con cédula. De `booking_reviews` no ve el comentario, que es texto libre del
-  cliente. Eso se hace con permisos por columna. Para un reporte basta con contar
+- **rol_lectura no ve datos personales.** No lee `clients`, su historia de estados, `sent_emails` ni
+  `login_attempts`. De `organizations` no ve el documento, el correo ni el teléfono, porque desde V4
+  un proveedor puede ser una persona natural con cédula. De `booking_reviews` no ve el comentario, que
+  es texto libre del cliente. Eso se hace con permisos por columna. Para un reporte basta con contar
   `bookings.client_id`.
 - **Nadie crea objetos en `public`** salvo rol_admin.
 
 ### RLS
 
-Activo RLS en las 29 tablas, siguiendo el ADR-0002 del equipo. Con RLS activo y sin políticas nadie
+Activo RLS en las 30 tablas, siguiendo el ADR-0002 del equipo. Con RLS activo y sin políticas nadie
 distinto del dueño ve filas, así que cada rol propio recibe su política. Las políticas abren filas y lo
 que cada rol puede *hacer* lo siguen limitando los `GRANT`. El control de qué proveedor ve qué datos
 lo hace el backend con `OrganizationAccess` (ADR-0008); la base no lo repite.
@@ -1315,21 +1485,22 @@ Flyway seguiría migrando con el usuario dueño (`spring.flyway.user`) y la apli
 
 ### Comprobado
 
-Las pruebas 18 a 25 de [`pruebas-integridad.sql`](pruebas-integridad.sql) intentan lo que cada rol
+Las pruebas 27 a 34 de [`pruebas-integridad.sql`](pruebas-integridad.sql) intentan lo que cada rol
 *no* debe poder hacer, y todas terminan en `permission denied`. La parte 3 hace con rol_app lo que hace
-el backend (reservar, pagar, editar un servicio y reescribir una agenda) y todo pasa, triggers
-incluidos. También corre con rol_lectura un reporte de calificaciones. Las políticas de Supabase las probé con un `auth.uid()` simulado: un cliente ve sus 4
-reservas de 11 y no puede leer `clients` ni crear pagos.
+el backend (reservar, asignar un recurso, confirmar, pagar, editar un servicio y reescribir una
+agenda) y todo pasa, triggers incluidos. También corre con rol_lectura un reporte de calificaciones.
+Las políticas de Supabase las probé con un `auth.uid()` simulado: un cliente ve sólo sus reservas y no
+puede leer `clients` ni crear pagos.
 
 ## 7. Análisis de almacenamiento, costo y optimización
 
 Está en [`docs/analisis-almacenamiento.md`](docs/analisis-almacenamiento.md). En resumen:
 
 - **Tabla analizada:** `bookings`. L = 183 bytes, FR = 43, BR = 36 838 páginas (288 MB). El índice
-  `bookings_pkey` tiene orden d = 186, altura 3 y como máximo 8 564 nodos (67 MB). PostgreSQL mide
-  39 600 páginas y un índice de altura 3 con 8 307 páginas.
+  `pk_bookings` tiene orden d = 186, altura 3 y como máximo 8 564 nodos (67 MB). PostgreSQL mide
+  39 600 páginas y un índice de altura 3 con 8 263 páginas.
 - **Costo:** para la consulta 24, el ciclo anidado con índice cuesta 2 370 páginas frente a 36 848 del
-  hash join y 184 589 del ordenamiento y mezcla. El plan real lee 2 366.
+  hash join y 184 589 del ordenamiento y mezcla. El plan real lee 2 338.
 - **Optimización:** de E₀, con un producto de 8 600 millones de tuplas, a E₁, que filtra y proyecta
   antes de la reunión con las leyes 2, 4/5, 9, 3, 8 y 11, y sólo combina 8 servicios con 99 000
   reservas para quedarse con 146.
@@ -1339,7 +1510,7 @@ Está en [`docs/analisis-almacenamiento.md`](docs/analisis-almacenamiento.md). E
 | # | Criterio | Dónde |
 |---|---|---|
 | 1 | MER refinado | [Sección 1](#1-mer-refinado) y [qué cambió](#qué-cambió-frente-al-sprint-1) |
-| 2 | Modelo físico completo | [Sección 2](#2-modelo-físico), con normalización |
+| 2 | Modelo físico completo | [Sección 2](#2-modelo-físico), con [normalización](#normalización) |
 | 3 | schema.sql | [`schema.sql`](schema.sql) y [sección 3](#3-schemasql) |
 | 4 | Consultas de los dos sprints | [Sección 4](#4-consultas) y [`consultas.sql`](consultas.sql) |
 | 5 | Estimación de volumen | [Sección 5](#5-estimación-de-volumen) |
