@@ -1,6 +1,6 @@
 # Plataforma de Reservas de Servicios — Modelo de datos
 
-Sprint 2 · Bases de Datos · CodeF@ctory 2026-II
+Sprint 2 · Bases de Datos · CodeF@ctory 2026-II<br>
 Anderson Herrera Guzmán · Facultad de Ingeniería, Universidad de Antioquia
 
 Este repositorio tiene el modelo de datos del caso *Plataforma de Reservas de Servicios*. El backend
