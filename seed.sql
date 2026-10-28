@@ -12,9 +12,12 @@
 --  local, nunca para la base compartida. La guarda aborta si la base no se
 --  llama `reservas`.
 --
---  Las fechas son relativas a now(), así que el escenario siempre tiene
---  reservas pasadas, de hoy y futuras.
+--  Las fechas son relativas a hoy, así que el escenario siempre tiene
+--  reservas pasadas y futuras. Se arma en la hora de Medellín: así "hoy"
+--  y "las 10:00" son los de los negocios del ejemplo y no los de UTC.
 -- =====================================================================
+
+set timezone = 'America/Bogota';
 
 do $$
 begin
@@ -25,9 +28,9 @@ begin
     end if;
 end $$;
 
-truncate table audit_log, resource_occupancy_daily, payments, waitlist_entries, booking_reviews,
+truncate table audit_log_changes, audit_log, resource_occupancy_daily, payments, waitlist_entries, booking_reviews,
                client_status_changes, organization_status_changes, booking_status_changes,
-               booking_resources, bookings, agenda_exceptions, schedules, agenda_services, agendas,
+               session_resources, bookings, sessions, agenda_exceptions, schedules, agenda_services, agendas,
                resource_maintenances, sent_emails, resources, service_resource_requirements,
                service_locations, services, resource_types, locations,
                organization_policies, organization_members, organizations,
@@ -162,23 +165,25 @@ insert into resources (id, resource_type_id, location_id, name, capacity, status
 -- La silla 2 entra a mantenimiento justo cuando Laura tiene su barba:
 -- la consulta 20 lo detecta.
 insert into resource_maintenances (resource_id, starts_at, ends_at, reason) values
-    ('cccc0000-0000-0000-0000-000000000002', now() + interval '3 days' - interval '1 hour', now() + interval '3 days' + interval '2 hours', 'Cambio de tapicería'),
+    ('cccc0000-0000-0000-0000-000000000002', current_date + 3 + time '09:00', current_date + 3 + time '12:00', 'Cambio de tapicería'),
     ('cccc0000-0000-0000-0000-000000000004', now() - interval '20 days', now() - interval '19 days', 'Revisión del sillón hidráulico');
 
 
 -- ---------- agendas: una por recurso activo ----------
 -- Granularidad de 30 minutos, vigente desde hace dos meses y sin fecha de
--- fin, con los servicios que se prestan en su sede. Lunes a viernes de
--- 8:00 a 18:00 y fines de semana de 8:00 a 13:00.
-insert into agendas (location_id, resource_id, name, slot_minutes, valid_from)
-select r.location_id, r.id, 'Agenda ' || r.name, 30, current_date - 60
+-- fin, con los servicios que se prestan en la sede del recurso. Lunes a
+-- viernes de 8:00 a 18:00 y fines de semana de 8:00 a 13:00. Son agendas
+-- de recurso, así que no llevan location_id: la sede sale del recurso.
+insert into agendas (resource_id, name, slot_minutes, valid_from)
+select r.id, 'Agenda ' || r.name, 30, current_date - 60
 from resources r
 where r.status = 'ACTIVE';
 
 insert into agenda_services (agenda_id, service_id)
 select a.id, sl.service_id
 from agendas a
-    inner join service_locations sl on sl.location_id = a.location_id;
+    inner join resources         r  on r.id = a.resource_id
+    inner join service_locations sl on sl.location_id = r.location_id;
 
 insert into schedules (agenda_id, day_of_week, start_time, end_time, active)
 select a.id, d.dow, time '08:00',
@@ -192,7 +197,8 @@ from agendas a
 insert into agenda_exceptions (agenda_id, exception_date, start_time, end_time, reason)
 select a.id, current_date + 7, null, null, 'Festivo'
 from agendas a
-where a.location_id = '88888888-0000-0000-0000-000000000001';
+    inner join resources r on r.id = a.resource_id
+where r.location_id = '88888888-0000-0000-0000-000000000001';
 
 insert into agenda_exceptions (agenda_id, exception_date, start_time, end_time, reason)
 select a.id, current_date + 1, time '14:00', time '18:00', 'Capacitación del personal'
@@ -205,53 +211,83 @@ from agendas a
 where a.resource_id = 'cccc0000-0000-0000-0000-000000000003';
 
 
--- ---------- reservas ----------
--- session_id: en servicios individuales coincide con el id de la reserva;
--- en el taller grupal DOS reservas comparten la sesión ffff...0001 y por
--- tanto comparten el salón sin chocar con el EXCLUDE.
--- COMPLETED y NO_SHOW no pasan por las reglas de cupo: ya ocurrieron.
-insert into bookings (id, client_id, service_id, location_id, policy_id, session_id, starts_at, ends_at, attendees, total_price, currency_id, status, cancelled_at) values
-    ('dddd0000-0000-0000-0000-000000000001', '44444444-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000001', now() + interval '2 days',  now() + interval '2 days'  + interval '30 minutes',  1,  35000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', null),
-    ('dddd0000-0000-0000-0000-000000000002', '44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000002', now() + interval '3 days',  now() + interval '3 days'  + interval '45 minutes',  1,  45000.00, '33333333-0000-0000-0000-000000000001', 'RESERVED',  null),
-    -- GRUPAL, sesión compartida: Camilo con 6 plazas...
-    ('dddd0000-0000-0000-0000-000000000003', '44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'ffff0000-0000-0000-0000-000000000001', now() + interval '5 days',  now() + interval '5 days'  + interval '120 minutes', 6, 180000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', null),
-    -- ...y Sara con 2 más en el MISMO taller: 6 + 2 = 8 = cupo exacto
-    ('dddd0000-0000-0000-0000-000000000008', '44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'ffff0000-0000-0000-0000-000000000001', now() + interval '5 days',  now() + interval '5 days'  + interval '120 minutes', 2,  60000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', null),
-    ('dddd0000-0000-0000-0000-000000000004', '44444444-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000004', '88888888-0000-0000-0000-000000000003', '77777777-0000-0000-0000-000000000003', 'dddd0000-0000-0000-0000-000000000004', now() + interval '1 days',  now() + interval '1 days'  + interval '40 minutes',  1,  90000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', null),
-    -- Histórica: por eso 'Blanqueamiento' se desactiva, no se borra (HU-004)
-    ('dddd0000-0000-0000-0000-000000000005', '44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000005', '88888888-0000-0000-0000-000000000003', '77777777-0000-0000-0000-000000000003', 'dddd0000-0000-0000-0000-000000000005', now() - interval '20 days', now() - interval '20 days' + interval '60 minutes',  1, 250000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null),
-    -- Cancelada: ocupa la misma silla y franja que la reserva 1 y NO choca
-    ('dddd0000-0000-0000-0000-000000000006', '44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000006', now() + interval '2 days',  now() + interval '2 days'  + interval '30 minutes',  1,  35000.00, '33333333-0000-0000-0000-000000000001', 'CANCELLED', now() - interval '1 days'),
+-- ---------- sesiones y reservas ----------
+-- Cada sesión es un servicio, en una sede, a una hora. Las individuales
+-- tienen una reserva; el taller grupal (sesión ...0003) tiene dos, la de
+-- Camilo y la de Sara, que comparten salón y horario sin repetirlos. Todas
+-- caen entre las 8:00 y las 13:00, dentro del horario de cualquier día.
+insert into sessions (id, service_id, location_id, starts_at, ends_at) values
+    ('ffff0000-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', current_date + 2  + time '10:00', current_date + 2  + time '10:30'),
+    ('ffff0000-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', current_date + 3  + time '10:00', current_date + 3  + time '10:45'),
+    ('ffff0000-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', current_date + 5  + time '09:00', current_date + 5  + time '11:00'),
+    ('ffff0000-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000004', '88888888-0000-0000-0000-000000000003', current_date + 1  + time '09:00', current_date + 1  + time '09:40'),
+    ('ffff0000-0000-0000-0000-000000000005', 'aaaa0000-0000-0000-0000-000000000005', '88888888-0000-0000-0000-000000000003', current_date - 20 + time '11:00', current_date - 20 + time '12:00'),
+    ('ffff0000-0000-0000-0000-000000000006', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', current_date + 2  + time '10:00', current_date + 2  + time '10:30'),
+    ('ffff0000-0000-0000-0000-000000000007', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', current_date - 25 + time '11:00', current_date - 25 + time '11:45'),
+    ('ffff0000-0000-0000-0000-000000000009', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', current_date - 8  + time '10:30', current_date - 8  + time '11:00'),
+    ('ffff0000-0000-0000-0000-000000000010', 'aaaa0000-0000-0000-0000-000000000004', '88888888-0000-0000-0000-000000000003', current_date - 3  + time '08:30', current_date - 3  + time '09:10'),
+    ('ffff0000-0000-0000-0000-000000000011', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', current_date - 12 + time '09:30', current_date - 12 + time '10:00'),
+    ('ffff0000-0000-0000-0000-000000000012', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002', current_date - 6  + time '11:30', current_date - 6  + time '12:00'),
+    ('ffff0000-0000-0000-0000-000000000013', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', current_date - 2  + time '09:00', current_date - 2  + time '09:45'),
+    ('ffff0000-0000-0000-0000-000000000014', 'aaaa0000-0000-0000-0000-000000000004', '88888888-0000-0000-0000-000000000003', current_date - 15 + time '10:00', current_date - 15 + time '10:40');
+
+-- Las reservas vivas entran como entraría cualquiera: pasan por todas las
+-- reglas de cupo, estado y política. created_at importa: la política que
+-- congelan es la que regía ese día.
+insert into bookings (id, client_id, session_id, policy_id, attendees, total_price, currency_id, status, created_at) values
+    ('dddd0000-0000-0000-0000-000000000001', '44444444-0000-0000-0000-000000000001', 'ffff0000-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 1,  35000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', now() - interval '1 days'),
+    -- Salió de la lista de espera: se creó cuando a Laura le avisaron del cupo
+    ('dddd0000-0000-0000-0000-000000000002', '44444444-0000-0000-0000-000000000002', 'ffff0000-0000-0000-0000-000000000002', '77777777-0000-0000-0000-000000000002', 1,  45000.00, '33333333-0000-0000-0000-000000000001', 'RESERVED',  now() - interval '4 days'),
+    -- GRUPAL: Camilo con 6 plazas...
+    ('dddd0000-0000-0000-0000-000000000003', '44444444-0000-0000-0000-000000000003', 'ffff0000-0000-0000-0000-000000000003', '77777777-0000-0000-0000-000000000002', 6, 180000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', now() - interval '2 days'),
+    -- ...y Sara con 2 más en la MISMA sesión: 6 + 2 = 8 = cupo exacto
+    ('dddd0000-0000-0000-0000-000000000008', '44444444-0000-0000-0000-000000000004', 'ffff0000-0000-0000-0000-000000000003', '77777777-0000-0000-0000-000000000002', 2,  60000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', now() - interval '1 days'),
+    ('dddd0000-0000-0000-0000-000000000004', '44444444-0000-0000-0000-000000000001', 'ffff0000-0000-0000-0000-000000000004', '77777777-0000-0000-0000-000000000003', 1,  90000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', now() - interval '1 days');
+
+-- Las reservas que ya se cerraron se cargan como historia, con su estado
+-- final. En la operación una reserva nace RESERVED o CONFIRMED y llega a
+-- esos estados después, así que para cargarlas se apaga sólo la regla de
+-- estados y cupo. La de coherencia (política vigente, moneda) sí corre.
+alter table bookings disable trigger tg_bookings_reglas;
+
+insert into bookings (id, client_id, session_id, policy_id, attendees, total_price, currency_id, status, cancelled_at, created_at) values
+    -- 'Blanqueamiento' se desactivó después, pero no se borra por esta reserva (HU-004)
+    ('dddd0000-0000-0000-0000-000000000005', '44444444-0000-0000-0000-000000000002', 'ffff0000-0000-0000-0000-000000000005', '77777777-0000-0000-0000-000000000003', 1, 250000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null,                     now() - interval '21 days'),
+    -- Cancelada: era a la misma hora que la reserva 1. Su sesión no tiene
+    -- recursos, así que no le quita la silla a nadie.
+    ('dddd0000-0000-0000-0000-000000000006', '44444444-0000-0000-0000-000000000003', 'ffff0000-0000-0000-0000-000000000006', '77777777-0000-0000-0000-000000000002', 1,  35000.00, '33333333-0000-0000-0000-000000000001', 'CANCELLED', now() - interval '1 days', now() - interval '3 days'),
     -- CLAVE PARA HU-002: creada cuando regía la política v1 de la barbería.
     -- Conserva 1440 minutos de cancelación gratis aunque la v2 los bajó a 720.
-    ('dddd0000-0000-0000-0000-000000000007', '44444444-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000001', 'dddd0000-0000-0000-0000-000000000007', now() - interval '25 days', now() - interval '25 days' + interval '45 minutes',  1,  40000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null),
-    ('dddd0000-0000-0000-0000-000000000009', '44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000009', now() - interval '8 days',  now() - interval '8 days'  + interval '30 minutes',  1,  35000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null),
-    ('dddd0000-0000-0000-0000-000000000010', '44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000004', '88888888-0000-0000-0000-000000000003', '77777777-0000-0000-0000-000000000003', 'dddd0000-0000-0000-0000-000000000010', now() - interval '3 days',  now() - interval '3 days'  + interval '40 minutes',  1,  90000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null),
-    ('dddd0000-0000-0000-0000-000000000011', '44444444-0000-0000-0000-000000000006', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000011', now() - interval '12 days', now() - interval '12 days' + interval '30 minutes',  1,  35000.00, '33333333-0000-0000-0000-000000000001', 'NO_SHOW',   null),
-    ('dddd0000-0000-0000-0000-000000000012', '44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000012', now() - interval '6 days',  now() - interval '6 days'  + interval '30 minutes',  1,  35000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null),
-    ('dddd0000-0000-0000-0000-000000000013', '44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', 'dddd0000-0000-0000-0000-000000000013', now() - interval '2 days',  now() - interval '2 days'  + interval '45 minutes',  1,  45000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null),
-    ('dddd0000-0000-0000-0000-000000000014', '44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-000000000004', '88888888-0000-0000-0000-000000000003', '77777777-0000-0000-0000-000000000003', 'dddd0000-0000-0000-0000-000000000014', now() - interval '15 days', now() - interval '15 days' + interval '40 minutes',  1,  90000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null);
+    ('dddd0000-0000-0000-0000-000000000007', '44444444-0000-0000-0000-000000000001', 'ffff0000-0000-0000-0000-000000000007', '77777777-0000-0000-0000-000000000001', 1,  40000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null,                     now() - interval '28 days'),
+    ('dddd0000-0000-0000-0000-000000000009', '44444444-0000-0000-0000-000000000003', 'ffff0000-0000-0000-0000-000000000009', '77777777-0000-0000-0000-000000000002', 1,  35000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null,                     now() - interval '9 days'),
+    ('dddd0000-0000-0000-0000-000000000010', '44444444-0000-0000-0000-000000000004', 'ffff0000-0000-0000-0000-000000000010', '77777777-0000-0000-0000-000000000003', 1,  90000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null,                     now() - interval '4 days'),
+    -- También con la v1: se reservó antes del cambio de política
+    ('dddd0000-0000-0000-0000-000000000011', '44444444-0000-0000-0000-000000000006', 'ffff0000-0000-0000-0000-000000000011', '77777777-0000-0000-0000-000000000001', 1,  35000.00, '33333333-0000-0000-0000-000000000001', 'NO_SHOW',   null,                     now() - interval '13 days'),
+    ('dddd0000-0000-0000-0000-000000000012', '44444444-0000-0000-0000-000000000002', 'ffff0000-0000-0000-0000-000000000012', '77777777-0000-0000-0000-000000000002', 1,  35000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null,                     now() - interval '7 days'),
+    ('dddd0000-0000-0000-0000-000000000013', '44444444-0000-0000-0000-000000000004', 'ffff0000-0000-0000-0000-000000000013', '77777777-0000-0000-0000-000000000002', 1,  45000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null,                     now() - interval '3 days'),
+    ('dddd0000-0000-0000-0000-000000000014', '44444444-0000-0000-0000-000000000003', 'ffff0000-0000-0000-0000-000000000014', '77777777-0000-0000-0000-000000000003', 1,  90000.00, '33333333-0000-0000-0000-000000000001', 'COMPLETED', null,                     now() - interval '16 days');
 
-insert into booking_resources (booking_id, resource_id, session_id, starts_at, ends_at, status)
-select b.id, a.resource_id, b.session_id, b.starts_at, b.ends_at, b.status
-from bookings b
-join (values
-    ('dddd0000-0000-0000-0000-000000000001'::uuid, 'cccc0000-0000-0000-0000-000000000001'::uuid),
-    ('dddd0000-0000-0000-0000-000000000002'::uuid, 'cccc0000-0000-0000-0000-000000000002'::uuid),
-    -- las dos reservas del taller ocupan EL MISMO salón, misma sesión
-    ('dddd0000-0000-0000-0000-000000000003'::uuid, 'cccc0000-0000-0000-0000-000000000005'::uuid),
-    ('dddd0000-0000-0000-0000-000000000008'::uuid, 'cccc0000-0000-0000-0000-000000000005'::uuid),
-    ('dddd0000-0000-0000-0000-000000000004'::uuid, 'cccc0000-0000-0000-0000-000000000007'::uuid),
-    ('dddd0000-0000-0000-0000-000000000005'::uuid, 'cccc0000-0000-0000-0000-000000000007'::uuid),
-    ('dddd0000-0000-0000-0000-000000000006'::uuid, 'cccc0000-0000-0000-0000-000000000001'::uuid),
-    ('dddd0000-0000-0000-0000-000000000007'::uuid, 'cccc0000-0000-0000-0000-000000000002'::uuid),
-    ('dddd0000-0000-0000-0000-000000000009'::uuid, 'cccc0000-0000-0000-0000-000000000003'::uuid),
-    ('dddd0000-0000-0000-0000-000000000010'::uuid, 'cccc0000-0000-0000-0000-000000000007'::uuid),
-    ('dddd0000-0000-0000-0000-000000000011'::uuid, 'cccc0000-0000-0000-0000-000000000001'::uuid),
-    ('dddd0000-0000-0000-0000-000000000012'::uuid, 'cccc0000-0000-0000-0000-000000000006'::uuid),
-    ('dddd0000-0000-0000-0000-000000000013'::uuid, 'cccc0000-0000-0000-0000-000000000002'::uuid),
-    ('dddd0000-0000-0000-0000-000000000014'::uuid, 'cccc0000-0000-0000-0000-000000000007'::uuid)
-) as a(booking_id, resource_id) on a.booking_id = b.id;
+alter table bookings enable trigger tg_bookings_reglas;
+
+-- El taller ocupa el salón y las cuatro sillas que exige, una sola vez
+-- para las dos reservas.
+insert into session_resources (session_id, resource_id) values
+    ('ffff0000-0000-0000-0000-000000000001', 'cccc0000-0000-0000-0000-000000000001'),
+    ('ffff0000-0000-0000-0000-000000000002', 'cccc0000-0000-0000-0000-000000000002'),
+    ('ffff0000-0000-0000-0000-000000000003', 'cccc0000-0000-0000-0000-000000000005'),
+    ('ffff0000-0000-0000-0000-000000000003', 'cccc0000-0000-0000-0000-000000000001'),
+    ('ffff0000-0000-0000-0000-000000000003', 'cccc0000-0000-0000-0000-000000000002'),
+    ('ffff0000-0000-0000-0000-000000000003', 'cccc0000-0000-0000-0000-000000000003'),
+    ('ffff0000-0000-0000-0000-000000000003', 'cccc0000-0000-0000-0000-000000000004'),
+    ('ffff0000-0000-0000-0000-000000000004', 'cccc0000-0000-0000-0000-000000000007'),
+    ('ffff0000-0000-0000-0000-000000000005', 'cccc0000-0000-0000-0000-000000000007'),
+    ('ffff0000-0000-0000-0000-000000000007', 'cccc0000-0000-0000-0000-000000000002'),
+    ('ffff0000-0000-0000-0000-000000000009', 'cccc0000-0000-0000-0000-000000000003'),
+    ('ffff0000-0000-0000-0000-000000000010', 'cccc0000-0000-0000-0000-000000000007'),
+    ('ffff0000-0000-0000-0000-000000000011', 'cccc0000-0000-0000-0000-000000000001'),
+    ('ffff0000-0000-0000-0000-000000000012', 'cccc0000-0000-0000-0000-000000000006'),
+    ('ffff0000-0000-0000-0000-000000000013', 'cccc0000-0000-0000-0000-000000000002'),
+    ('ffff0000-0000-0000-0000-000000000014', 'cccc0000-0000-0000-0000-000000000007');
 
 insert into booking_status_changes (booking_id, from_status, to_status, reason, changed_by, changed_at) values
     ('dddd0000-0000-0000-0000-000000000001', 'RESERVED',  'CONFIRMED', null,                                 '44444444-0000-0000-0000-000000000001', now() - interval '1 days'),
@@ -273,12 +309,12 @@ insert into booking_reviews (booking_id, rating, comment, created_at) values
 -- ---------- lista de espera ----------
 -- El taller grupal está lleno (8 de 8): Laura y Daniela esperan cupo
 insert into waitlist_entries (client_id, service_id, location_id, desired_date, attendees, status, booking_id, notified_at, created_at) values
-    ('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', (now() + interval '5 days')::date, 1, 'WAITING', null, null,                      now() - interval '2 days'),
-    ('44444444-0000-0000-0000-000000000005', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', (now() + interval '5 days')::date, 2, 'WAITING', null, null,                      now() - interval '1 days'),
+    ('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', current_date + 5, 1, 'WAITING', null, null,                      now() - interval '2 days'),
+    ('44444444-0000-0000-0000-000000000005', 'aaaa0000-0000-0000-0000-000000000003', '88888888-0000-0000-0000-000000000001', current_date + 5, 2, 'WAITING', null, null,                      now() - interval '1 days'),
     -- Se le avisó y no tomó el cupo a tiempo
     ('44444444-0000-0000-0000-000000000001', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', current_date - 10,                 1, 'EXPIRED', null, now() - interval '11 days', now() - interval '12 days'),
     -- Esta sí terminó en reserva: la barba de Laura
-    ('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', (now() + interval '3 days')::date, 1, 'BOOKED', 'dddd0000-0000-0000-0000-000000000002', now() - interval '4 days', now() - interval '5 days');
+    ('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', current_date + 3, 1, 'BOOKED', 'dddd0000-0000-0000-0000-000000000002', now() - interval '4 days', now() - interval '5 days');
 
 
 -- ---------- pagos ----------
@@ -310,7 +346,8 @@ insert into sent_emails (recipient, subject, body, sent_at) values
 
 -- ---------- un cambio auditado ----------
 -- El dueño de la barbería sube el precio del corte. Las reservas ya hechas
--- conservan los 35000 pactados; audit_log guarda el antes y el después.
+-- conservan los 35000 pactados; audit_log guarda quién lo hizo y
+-- audit_log_changes el precio de antes y el de después.
 begin;
 set local app.user_id = '99999999-0000-0000-0000-000000000001';
 update services set price = 38000.00 where id = 'aaaa0000-0000-0000-0000-000000000001';

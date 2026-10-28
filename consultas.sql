@@ -11,8 +11,16 @@
 --
 --  Las del Sprint 1 son las mismas de esa entrega, ajustadas al modelo
 --  actual: la 5 usa identification_number, la 6 lee los bloques desde la
---  agenda, y la 9 y la 12 sacan la ciudad del catálogo.
+--  agenda, la 9 y la 12 sacan la ciudad del catálogo, y las que necesitan
+--  el servicio, la sede o la hora de una reserva los toman de su sesión.
+--
+--  Los negocios del ejemplo están en Medellín. Sin la línea de abajo,
+--  current_date, date_trunc y ::date usarían la zona del servidor, que en
+--  Supabase es UTC, y una cita de las 8 de la noche caería en el día, la
+--  semana o el mes siguiente.
 -- =====================================================================
+
+set timezone = 'America/Bogota';
 
 
 -- =====================================================================
@@ -46,15 +54,16 @@ order by o.name, s.name;
 -- 2. ¿Cuál es la ocupación por sede y semana? Es el reporte de uso que
 --    pide el enunciado del caso.
 \echo '=== 2. Ocupación e ingresos por sede y semana ==='
-select l.name                                as sede,
-       date_trunc('week', b.starts_at)::date as semana,
-       count(*)                              as reservas,
-       sum(b.attendees)                      as asistentes,
-       sum(b.total_price)                    as ingresos
+select l.name                                 as sede,
+       date_trunc('week', se.starts_at)::date as semana,
+       count(*)                               as reservas,
+       sum(b.attendees)                       as asistentes,
+       sum(b.total_price)                     as ingresos
 from bookings b
-    inner join locations l on l.id = b.location_id
+    inner join sessions  se on se.id = b.session_id
+    inner join locations l  on l.id  = se.location_id
 where b.status in ('CONFIRMED', 'COMPLETED')
-group by l.name, date_trunc('week', b.starts_at)
+group by l.name, date_trunc('week', se.starts_at)
 order by semana, sede;
 
 
@@ -92,9 +101,10 @@ from (
            count(b.id) as reservas,
            rank() over (partition by o.id order by count(b.id) desc) as posicion
     from services s
-        inner join organizations o on o.id = s.organization_id
-        left  join bookings      b on b.service_id = s.id
-                                  and b.status in ('CONFIRMED', 'COMPLETED')
+        inner join organizations o  on o.id = s.organization_id
+        left  join sessions      se on se.service_id = s.id
+        left  join bookings      b  on b.session_id = se.id
+                                   and b.status in ('CONFIRMED', 'COMPLETED')
     group by o.id, o.name, s.name
 ) ranking
 where posicion <= 3
@@ -110,36 +120,46 @@ select b.id        as reserva,
        c.phone,
        s.name      as servicio,
        l.name      as sede,
-       b.starts_at,
+       se.starts_at,
        b.status
 from bookings b
-    inner join services  s on s.id = b.service_id
-    inner join clients   c on c.id = b.client_id
-    inner join locations l on l.id = b.location_id
+    inner join sessions  se on se.id = b.session_id
+    inner join services  s  on s.id  = se.service_id
+    inner join clients   c  on c.id  = b.client_id
+    inner join locations l  on l.id  = se.location_id
 where s.organization_id = (select id from organizations where identification_type = 'NIT' and identification_number = '900123456-1')
-  and b.starts_at >= now()
+  and se.starts_at >= now()
   and b.status in ('RESERVED', 'CONFIRMED')
-order by b.starts_at;
+order by se.starts_at;
 
 
 -- 6. ¿Qué agenda tiene cada recurso pasado mañana y cuánta carga lleva?
---    El left join es lo que deja ver también los recursos libres.
+--    El left join es lo que deja ver también los recursos libres. Cuenta
+--    sesiones vivas dentro de cada bloque: el taller ocupa el salón una vez
+--    aunque tenga dos reservas, y una sesión de la mañana no se cuenta en
+--    el bloque de la tarde.
 \echo '=== 6. Agenda y carga de cada recurso para pasado mañana ==='
-select l.name               as sede,
-       r.name               as recurso,
-       sch.start_time       as abre,
-       sch.end_time         as cierra,
-       count(br.booking_id) as reservas_vivas
+select l.name         as sede,
+       r.name         as recurso,
+       sch.start_time as abre,
+       sch.end_time   as cierra,
+       count(se.id)   as sesiones
 from schedules sch
     inner join agendas   a on a.id = sch.agenda_id
-                          and (now() + interval '2 days')::date >= a.valid_from
-                          and (a.valid_until is null or (now() + interval '2 days')::date <= a.valid_until)
+                          and current_date + 2 >= a.valid_from
+                          and (a.valid_until is null or current_date + 2 <= a.valid_until)
     inner join resources r on r.id = a.resource_id
     inner join locations l on l.id = r.location_id
-    left  join booking_resources br on br.resource_id = r.id
-                                   and br.status in ('RESERVED', 'CONFIRMED')
-                                   and br.starts_at::date = (now() + interval '2 days')::date
-where sch.day_of_week = extract(isodow from now() + interval '2 days')
+    left  join (session_resources sr
+                inner join sessions se on se.id = sr.session_id
+                                      and se.starts_at::date = current_date + 2
+                                      and exists (select 1 from bookings b
+                                                   where b.session_id = se.id
+                                                     and b.status in ('RESERVED', 'CONFIRMED')))
+               on  sr.resource_id = r.id
+               and se.starts_at::time >= sch.start_time
+               and se.starts_at::time <  sch.end_time
+where sch.day_of_week = extract(isodow from current_date + 2)
   and sch.active
 group by l.name, r.name, sch.start_time, sch.end_time
 order by l.name, r.name;
@@ -197,7 +217,7 @@ order by c.created_at;
 --     prueba de que la regla de HU-002 está resuelta en el modelo.
 \echo '=== 10. Condiciones congeladas en cada reserva ==='
 select o.name                              as organizacion,
-       b.starts_at,
+       se.starts_at,
        b.status,
        op.version                          as version_politica,
        op.free_cancellation_window_minutes as minutos_cancelacion_gratis,
@@ -205,9 +225,10 @@ select o.name                              as organizacion,
             then 'vigente'
             else 'histórica' end           as estado_de_la_politica
 from bookings b
+    inner join sessions              se on se.id = b.session_id
     inner join organization_policies op on op.id = b.policy_id
     inner join organizations         o  on o.id  = op.organization_id
-order by o.name, b.starts_at;
+order by o.name, se.starts_at;
 
 
 -- 11. ¿El correo, el documento o el NIT ya están registrados? Es la
@@ -302,9 +323,10 @@ select o.name                  as organizacion,
        min(br.rating)          as peor,
        max(br.rating)          as mejor
 from booking_reviews br
-    inner join bookings      b on b.id = br.booking_id
-    inner join services      s on s.id = b.service_id
-    inner join organizations o on o.id = s.organization_id
+    inner join bookings      b  on b.id  = br.booking_id
+    inner join sessions      se on se.id = b.session_id
+    inner join services      s  on s.id  = se.service_id
+    inner join organizations o  on o.id  = s.organization_id
 group by o.name, s.name
 order by promedio desc, resenas desc;
 
@@ -337,15 +359,17 @@ with movimientos as (
     select s.organization_id, p.currency_id,
            date_trunc('month', p.paid_at) as mes, p.amount as cobrado, 0 as devuelto
     from payments p
-        inner join bookings b on b.id = p.booking_id
-        inner join services s on s.id = b.service_id
+        inner join bookings b  on b.id  = p.booking_id
+        inner join sessions se on se.id = b.session_id
+        inner join services s  on s.id  = se.service_id
     where p.status in ('PAID', 'REFUNDED')
     union all
     select s.organization_id, p.currency_id,
            date_trunc('month', p.refunded_at), 0, p.amount
     from payments p
-        inner join bookings b on b.id = p.booking_id
-        inner join services s on s.id = b.service_id
+        inner join bookings b  on b.id  = p.booking_id
+        inner join sessions se on se.id = b.session_id
+        inner join services s  on s.id  = se.service_id
     where p.status = 'REFUNDED'
 )
 select o.name                          as organizacion,
@@ -363,6 +387,7 @@ order by organizacion, mes;
 
 -- 19. ¿Qué agendas cierran o recortan su horario en las próximas dos
 --     semanas? Sirve para avisar a los clientes con reservas esos días.
+--     La sede es la de la agenda, si es de toda la sede, o la de su recurso.
 \echo '=== 19. Cierres y jornadas recortadas en las próximas dos semanas ==='
 select e.exception_date                                   as dia,
        l.name                                             as sede,
@@ -371,8 +396,8 @@ select e.exception_date                                   as dia,
        e.reason                                           as motivo
 from agenda_exceptions e
     inner join agendas   a on a.id = e.agenda_id
-    inner join locations l on l.id = a.location_id
     left  join resources r on r.id = a.resource_id
+    inner join locations l on l.id = coalesce(a.location_id, r.location_id)
 where e.exception_date between current_date and current_date + 14
 order by dia, sede, recurso;
 
@@ -385,15 +410,16 @@ select r.name       as recurso,
        m.ends_at    as mantenimiento_hasta,
        m.reason     as motivo,
        c.full_name  as cliente,
-       br.starts_at as reserva
+       se.starts_at as reserva
 from resource_maintenances m
     inner join resources         r  on r.id = m.resource_id
-    inner join booking_resources br on br.resource_id = m.resource_id
-                                   and tstzrange(br.starts_at, br.ends_at) && tstzrange(m.starts_at, m.ends_at)
-                                   and br.status in ('RESERVED', 'CONFIRMED')
-    inner join bookings          b  on b.id = br.booking_id
+    inner join session_resources sr on sr.resource_id = m.resource_id
+    inner join sessions          se on se.id = sr.session_id
+                                   and tstzrange(se.starts_at, se.ends_at) && tstzrange(m.starts_at, m.ends_at)
+    inner join bookings          b  on b.session_id = se.id
+                                   and b.status in ('RESERVED', 'CONFIRMED')
     inner join clients           c  on c.id = b.client_id
-order by br.starts_at;
+order by se.starts_at;
 
 
 -- 21. ¿Qué servicios encuentra quien busca "clasico", sin tilde? Es la
@@ -413,38 +439,37 @@ order by o.name, s.name;
 -- 22. ¿Qué reservas atendidas en los últimos 30 días no tienen reseña?
 --     Es a quién pedirle que califique. Antijoin con not exists.
 \echo '=== 22. Reservas completadas sin reseña ==='
-select c.full_name as cliente,
+select c.full_name  as cliente,
        c.email,
-       s.name      as servicio,
-       b.starts_at as atendida
+       s.name       as servicio,
+       se.starts_at as atendida
 from bookings b
-    inner join clients  c on c.id = b.client_id
-    inner join services s on s.id = b.service_id
+    inner join sessions se on se.id = b.session_id
+    inner join clients  c  on c.id  = b.client_id
+    inner join services s  on s.id  = se.service_id
 where b.status = 'COMPLETED'
-  and b.starts_at >= now() - interval '30 days'
+  and se.starts_at >= now() - interval '30 days'
   and not exists (select 1 from booking_reviews br where br.booking_id = b.id)
-order by b.starts_at;
+order by se.starts_at;
 
 
 -- 23. ¿Quién cambió datos sensibles en la última semana y qué cambió?
---     Consulta del administrador sobre la auditoría: compara el antes y
---     el después de cada columna modificada.
+--     Consulta del administrador sobre la auditoría: cada columna
+--     modificada, con su valor de antes y el de después.
 \echo '=== 23. Cambios auditados en la última semana ==='
 select a.changed_at,
        a.table_name,
-       a.operation,
+       a.record_id,
        a.db_user,
        a.app_user_id,
-       d.key                 as columna,
-       a.old_data -> d.key   as antes,
-       d.value               as despues
+       ch.column_name as columna,
+       ch.old_value   as antes,
+       ch.new_value   as despues
 from audit_log a
-    cross join lateral jsonb_each(a.new_data) d
+    inner join audit_log_changes ch on ch.audit_log_id = a.id
 where a.operation = 'UPDATE'
   and a.changed_at >= now() - interval '7 days'
-  and d.value is distinct from a.old_data -> d.key
-  and d.key <> 'updated_at'
-order by a.changed_at desc;
+order by a.changed_at desc, ch.column_name;
 
 
 -- 24. ¿Cuántas reservas e ingresos dejó cada servicio de un proveedor en
@@ -454,11 +479,12 @@ order by a.changed_at desc;
 select s.name             as servicio,
        count(*)           as reservas,
        sum(b.total_price) as ingresos
-from bookings b
-    inner join services s on s.id = b.service_id
+from services s
+    inner join sessions se on se.service_id = s.id
+    inner join bookings b  on b.session_id  = se.id
 where s.organization_id = '66666666-0000-0000-0000-000000000001'
-  and b.starts_at >= date_trunc('month', now())
-  and b.starts_at <  date_trunc('month', now()) + interval '1 month'
+  and se.starts_at >= date_trunc('month', now())
+  and se.starts_at <  date_trunc('month', now()) + interval '1 month'
   and b.status in ('CONFIRMED', 'COMPLETED')
 group by s.name
 order by ingresos desc;

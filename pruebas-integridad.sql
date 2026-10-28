@@ -13,6 +13,8 @@
 -- =====================================================================
 
 \set ON_ERROR_STOP off
+-- Las fechas del seed están en la hora de Medellín
+set timezone = 'America/Bogota';
 
 \echo ''
 \echo '#####################  Parte 1: calidad de los datos  #####################'
@@ -47,7 +49,7 @@ select id, current_date + 7, time '10:00', time '12:00', 'Reunión' from agendas
 \echo '--- 7. Anotarse dos veces en la lista de espera del mismo taller y día ---'
 insert into waitlist_entries (client_id, service_id, location_id, desired_date)
 values ('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000003',
-        '88888888-0000-0000-0000-000000000001', (now() + interval '5 days')::date);
+        '88888888-0000-0000-0000-000000000001', current_date + 5);
 
 \echo ''
 \echo '--- 8. Una entrada marcada como BOOKED que no apunta a ninguna reserva ---'
@@ -146,60 +148,76 @@ select id, 'aaaa0000-0000-0000-0000-000000000002' from agendas where resource_id
 
 \echo ''
 \echo '--- 24. Reservar en la barbería con la política de la clínica ---'
-insert into bookings (client_id, service_id, location_id, policy_id, session_id, starts_at, ends_at, total_price, currency_id)
-values ('44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000001',
-        '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000003', gen_random_uuid(),
-        now() + interval '12 days', now() + interval '12 days' + interval '30 minutes',
-        35000, '33333333-0000-0000-0000-000000000001');
+insert into bookings (client_id, session_id, policy_id, total_price, currency_id)
+values ('44444444-0000-0000-0000-000000000004', 'ffff0000-0000-0000-0000-000000000006',
+        '77777777-0000-0000-0000-000000000003', 35000, '33333333-0000-0000-0000-000000000001');
 
 \echo ''
 \echo '--- 25. Pactar el precio en una moneda que no es la del servicio ---'
-insert into bookings (client_id, service_id, location_id, policy_id, session_id, starts_at, ends_at, total_price, currency_id)
-values ('44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000001',
-        '88888888-0000-0000-0000-000000000001', '77777777-0000-0000-0000-000000000002', gen_random_uuid(),
-        now() + interval '12 days', now() + interval '12 days' + interval '30 minutes',
-        10, '33333333-0000-0000-0000-000000000002');
+insert into bookings (client_id, session_id, policy_id, total_price, currency_id)
+values ('44444444-0000-0000-0000-000000000004', 'ffff0000-0000-0000-0000-000000000006',
+        '77777777-0000-0000-0000-000000000002', 10, '33333333-0000-0000-0000-000000000002');
 
 \echo ''
-\echo '--- 26. Asignar a una reserva de Poblado la silla de la sede Envigado ---'
-insert into booking_resources (booking_id, resource_id, session_id, starts_at, ends_at, status)
-select id, 'cccc0000-0000-0000-0000-000000000006', session_id, starts_at, ends_at, status
-from bookings where id = 'dddd0000-0000-0000-0000-000000000002';
+\echo '--- 26. Asignar a una sesión de Poblado la silla de la sede Envigado ---'
+insert into session_resources (session_id, resource_id)
+values ('ffff0000-0000-0000-0000-000000000002', 'cccc0000-0000-0000-0000-000000000006');
 
 \echo ''
-\echo '--- 27. Juntar en una misma sesión dos reservas con horarios distintos ---'
-insert into bookings (client_id, service_id, location_id, policy_id, session_id, starts_at, ends_at, total_price, currency_id)
-select '44444444-0000-0000-0000-000000000004', service_id, location_id, policy_id, session_id,
-       starts_at + interval '3 hours', ends_at + interval '3 hours', total_price, currency_id
-from bookings where id = 'dddd0000-0000-0000-0000-000000000006';
+\echo '--- 27. Sobreocupación: la silla 1 ya atiende otra sesión a esa misma hora ---'
+insert into session_resources (session_id, resource_id)
+values ('ffff0000-0000-0000-0000-000000000006', 'cccc0000-0000-0000-0000-000000000001');
 
 \echo ''
-\echo '--- 28. Llevar a otra sede una reserva que ya tiene su silla asignada ---'
-update bookings set location_id = '88888888-0000-0000-0000-000000000002'
+\echo '--- 28. Mover una sesión encima de otra que usa la misma silla ---'
+update sessions
+   set starts_at = (select starts_at from sessions where id = 'ffff0000-0000-0000-0000-000000000001'),
+       ends_at   = (select ends_at   from sessions where id = 'ffff0000-0000-0000-0000-000000000001')
+ where id = 'ffff0000-0000-0000-0000-000000000011';
+
+\echo ''
+\echo '--- 29. Llevar a otra sede una sesión que ya tiene su silla asignada ---'
+update sessions set location_id = '88888888-0000-0000-0000-000000000002'
+where id = 'ffff0000-0000-0000-0000-000000000001';
+
+\echo ''
+\echo '--- 30. Cambiarle el servicio a una sesión que ya tiene reservas ---'
+update sessions set service_id = 'aaaa0000-0000-0000-0000-000000000002'
+where id = 'ffff0000-0000-0000-0000-000000000001';
+
+\echo ''
+\echo '--- 31. Pasar una reserva de corte a una sesión de barba ---'
+update bookings set session_id = 'ffff0000-0000-0000-0000-000000000013'
 where id = 'dddd0000-0000-0000-0000-000000000001';
 
 \echo ''
-\echo '--- 29. Cambiar de sede una silla que ya atendió reservas ---'
+\echo '--- 32. Cambiar de sede una silla que ya atendió sesiones ---'
 update resources set location_id = '88888888-0000-0000-0000-000000000002'
 where id = 'cccc0000-0000-0000-0000-000000000001';
 
 \echo ''
-\echo '--- 30. Pasarle una sede de la barbería a la clínica ---'
+\echo '--- 33. Pasarle una sede de la barbería a la clínica ---'
 update locations set organization_id = '66666666-0000-0000-0000-000000000002'
 where id = '88888888-0000-0000-0000-000000000002';
 
 \echo ''
-\echo '--- 31. Cambiar la moneda de un precio ya pactado ---'
+\echo '--- 34. Cambiar la moneda de un precio ya pactado ---'
 update bookings set currency_id = '33333333-0000-0000-0000-000000000002'
 where id = 'dddd0000-0000-0000-0000-000000000001';
 
 \echo ''
-\echo '--- 32. Pasarle a otro cliente una espera que ya terminó en reserva ---'
+\echo '--- 35. Pasarle a otro cliente una espera que ya terminó en reserva ---'
 update waitlist_entries set client_id = '44444444-0000-0000-0000-000000000003'
 where status = 'BOOKED';
 
 \echo ''
-\echo '--- 33. Mover una agenda a una sede donde no se prestan sus servicios ---'
+\echo '--- 36. Una agenda que es de una sede y de un recurso a la vez ---'
+insert into agendas (location_id, resource_id, name, slot_minutes, valid_from)
+values ('88888888-0000-0000-0000-000000000001', 'cccc0000-0000-0000-0000-000000000004',
+        'Agenda doble', 30, current_date);
+
+\echo ''
+\echo '--- 37. Mover una agenda a una sede donde no se prestan sus servicios ---'
 begin;
 insert into agendas (id, location_id, name, slot_minutes, valid_from)
 values ('eeee0000-0000-0000-0000-0000000000a1', '88888888-0000-0000-0000-000000000001', 'Agenda general', 30, current_date);
@@ -211,53 +229,85 @@ rollback;
 
 
 \echo ''
+\echo '--- 38. Cancelar una reserva que ya se atendió y tiene reseña ---'
+update bookings set status = 'CANCELLED', cancelled_at = now()
+where id = 'dddd0000-0000-0000-0000-000000000005';
+
+\echo ''
+\echo '--- 39. Crear una reserva que nace ya atendida ---'
+insert into bookings (client_id, session_id, policy_id, total_price, currency_id, status)
+values ('44444444-0000-0000-0000-000000000004', 'ffff0000-0000-0000-0000-000000000006',
+        '77777777-0000-0000-0000-000000000002', 35000, '33333333-0000-0000-0000-000000000001', 'COMPLETED');
+
+\echo ''
+\echo '--- 40. Reservar con un cliente suspendido ---'
+insert into bookings (client_id, session_id, policy_id, total_price, currency_id)
+values ('44444444-0000-0000-0000-000000000006', 'ffff0000-0000-0000-0000-000000000006',
+        '77777777-0000-0000-0000-000000000002', 35000, '33333333-0000-0000-0000-000000000001');
+
+\echo ''
+\echo '--- 41. Asignar a una sesión la Unidad B, que está retirada ---'
+insert into session_resources (session_id, resource_id)
+values ('ffff0000-0000-0000-0000-000000000004', 'cccc0000-0000-0000-0000-000000000008');
+
+\echo ''
+\echo '--- 42. Cambiarle a una reserva la política que se pactó ---'
+update bookings set policy_id = '77777777-0000-0000-0000-000000000001'
+where id = 'dddd0000-0000-0000-0000-000000000001';
+
+\echo ''
+\echo '--- 43. Suspender un proveedor sin registrar el motivo en esa transacción ---'
+update organizations set status = 'SUSPENDED'
+where id = '66666666-0000-0000-0000-000000000001';
+
+
 \echo '#####################  Parte 2: mínimo privilegio  #####################'
 
 \echo ''
-\echo '--- 34. rol_app borra una reserva: el backend nunca borra reservas, las cancela ---'
+\echo '--- 44. rol_app borra una reserva: el backend nunca borra reservas, las cancela ---'
 set role rol_app;
 delete from bookings where id = 'dddd0000-0000-0000-0000-000000000006';
 reset role;
 
 \echo ''
-\echo '--- 35. rol_app edita un historial: sólo puede agregarle filas ---'
+\echo '--- 45. rol_app edita un historial: sólo puede agregarle filas ---'
 set role rol_app;
 update booking_status_changes set reason = 'otro motivo';
 reset role;
 
 \echo ''
-\echo '--- 36. rol_app lee la auditoría: sólo la ve el administrador ---'
+\echo '--- 46. rol_app lee la auditoría: sólo la ve el administrador ---'
 set role rol_app;
 select count(*) from audit_log;
 reset role;
 
 \echo ''
-\echo '--- 37. rol_app crea una tabla: los cambios de esquema son de rol_admin ---'
+\echo '--- 47. rol_app crea una tabla: los cambios de esquema son de rol_admin ---'
 set role rol_app;
 create table tabla_intrusa (id int);
 reset role;
 
 \echo ''
-\echo '--- 38. rol_app cambia un catálogo: se cargan por migración ---'
+\echo '--- 48. rol_app cambia un catálogo: se cargan por migración ---'
 set role rol_app;
 insert into currencies (code, name) values ('EUR', 'Euro');
 reset role;
 
 \echo ''
-\echo '--- 39. rol_lectura lee datos personales de los clientes ---'
+\echo '--- 49. rol_lectura lee datos personales de los clientes ---'
 set role rol_lectura;
 select full_name, email from clients;
 reset role;
 
 \echo ''
-\echo '--- 40. rol_lectura modifica una reserva: sólo lee ---'
+\echo '--- 50. rol_lectura modifica una reserva: sólo lee ---'
 set role rol_lectura;
 update bookings set attendees = 2 where id = 'dddd0000-0000-0000-0000-000000000002';
 reset role;
 
 
 \echo ''
-\echo '--- 41. rol_lectura lee el documento y el teléfono de un proveedor ---'
+\echo '--- 51. rol_lectura lee el documento y el teléfono de un proveedor ---'
 set role rol_lectura;
 select name, identification_number, contact_phone from organizations;
 reset role;
@@ -265,31 +315,40 @@ reset role;
 
 \echo ''
 \echo '#####################  Parte 3: lo que rol_app sí puede  #####################'
-\echo 'Reserva, asigna un recurso, confirma, paga y reescribe los bloques de una'
-\echo 'agenda, como lo hace el backend. Al final se deshace todo. Si alguna línea'
-\echo 'dice ERROR, a rol_app le falta un permiso.'
+\echo 'Crea una sesión, reserva, asigna un recurso, confirma, paga, cancela otra'
+\echo 'reserva y reescribe los bloques de una agenda, como lo hace el backend. Al'
+\echo 'final se deshace todo. Si alguna línea dice ERROR, a rol_app le falta un permiso.'
 
 begin;
 set local role rol_app;
 
-insert into bookings (id, client_id, service_id, location_id, policy_id, session_id,
-                      starts_at, ends_at, total_price, currency_id)
+-- Una cita nueva: primero la sesión, después la reserva y el recurso
+insert into sessions (id, service_id, location_id, starts_at, ends_at)
+values ('eeee0000-0000-0000-0000-0000000000c1', 'aaaa0000-0000-0000-0000-000000000002',
+        '88888888-0000-0000-0000-000000000001',
+        now() + interval '9 days', now() + interval '9 days' + interval '45 minutes');
+
+insert into bookings (id, client_id, session_id, policy_id, total_price, currency_id)
 values ('eeee0000-0000-0000-0000-000000000001', '44444444-0000-0000-0000-000000000004',
-        'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001',
-        '77777777-0000-0000-0000-000000000002', 'eeee0000-0000-0000-0000-000000000001',
-        now() + interval '9 days', now() + interval '9 days' + interval '45 minutes',
+        'eeee0000-0000-0000-0000-0000000000c1', '77777777-0000-0000-0000-000000000002',
         45000, '33333333-0000-0000-0000-000000000001');
 
-insert into booking_resources (booking_id, resource_id, session_id, starts_at, ends_at, status)
-select id, 'cccc0000-0000-0000-0000-000000000003', session_id, starts_at, ends_at, status
-from bookings where id = 'eeee0000-0000-0000-0000-000000000001';
+insert into session_resources (session_id, resource_id)
+values ('eeee0000-0000-0000-0000-0000000000c1', 'cccc0000-0000-0000-0000-000000000003');
 
--- Al confirmar, la copia de booking_resources se actualiza sola
 update bookings set status = 'CONFIRMED' where id = 'eeee0000-0000-0000-0000-000000000001';
-select status as copia_sincronizada from booking_resources where booking_id = 'eeee0000-0000-0000-0000-000000000001';
 
 insert into payments (booking_id, amount, currency_id, method)
 values ('eeee0000-0000-0000-0000-000000000001', 45000, '33333333-0000-0000-0000-000000000001', 'CARD');
+
+-- Laura cancela su barba: su sesión se queda sin reservas vivas y suelta la silla 2
+update bookings set status = 'CANCELLED', cancelled_at = now()
+ where id = 'dddd0000-0000-0000-0000-000000000002';
+insert into booking_status_changes (booking_id, from_status, to_status, reason, changed_by)
+values ('dddd0000-0000-0000-0000-000000000002', 'RESERVED', 'CANCELLED', 'La silla entra a mantenimiento',
+        '99999999-0000-0000-0000-000000000002');
+select count(*) as recursos_que_le_quedan from session_resources
+ where session_id = 'ffff0000-0000-0000-0000-000000000002';
 
 update services set description = 'Perfilado y afeitado con navaja caliente'
  where id = 'aaaa0000-0000-0000-0000-000000000002';
@@ -312,9 +371,10 @@ begin;
 set local role rol_lectura;
 select o.name as proveedor, s.name as servicio, round(avg(br.rating), 2) as promedio
 from booking_reviews br
-    inner join bookings      b on b.id = br.booking_id
-    inner join services      s on s.id = b.service_id
-    inner join organizations o on o.id = s.organization_id
+    inner join bookings      b  on b.id  = br.booking_id
+    inner join sessions      se on se.id = b.session_id
+    inner join services      s  on s.id  = se.service_id
+    inner join organizations o  on o.id  = s.organization_id
 group by o.name, s.name
 order by promedio desc;
 rollback;
@@ -322,6 +382,6 @@ rollback;
 
 \echo ''
 \echo '====================================================================='
-\echo ' Las pruebas 1 a 41 debieron terminar en ERROR, y la parte 3 sin'
+\echo ' Las pruebas 1 a 51 debieron terminar en ERROR, y la parte 3 sin'
 \echo ' ningún ERROR. Si no, hay una regla o un permiso mal puesto.'
 \echo '====================================================================='
