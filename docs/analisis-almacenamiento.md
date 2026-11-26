@@ -12,7 +12,7 @@ reproducir. Los `uuid` sí salen distintos en cada corrida, así que el tamaño 
 | Dato | Valor |
 |---|---|
 | Tabla analizada | `bookings` |
-| Volumen (fin del año 1) | TR = 1 584 000 reservas y 1 435 500 sesiones, de la [estimación de volumen](../README.md#5-estimación-de-volumen) |
+| Volumen (fin del año 1) | TR = 1 584 000 reservas y 1 435 500 sesiones, de la [estimación de volumen](../README.md#7-estimación-de-volumen) |
 | Tamaño de página | P = B = 8 192 bytes, el bloque de PostgreSQL |
 | Memoria para operaciones | M = 512 páginas, los 4 MB de `work_mem` por defecto |
 
