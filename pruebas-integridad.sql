@@ -1,6 +1,12 @@
 -- =====================================================================
 --  Las reglas de integridad y de seguridad en acción
---  Sprint 2
+--  Sprint 2, ajustadas al Sprint 3
+--
+--  Las del Sprint 3 (triggers, procedimientos y permisos nuevos) están en
+--  pruebas-sprint3.sql. Aquí sólo cambió lo necesario para que cada
+--  prueba siga fallando por su propia regla: la 27, la 28, la 29 y la 31
+--  apuntan a sesiones que siguen teniendo sus recursos, y la parte 3 deja
+--  la historia antes de cada cambio de estado.
 --
 --  Cada instrucción de la primera y la segunda parte viola una regla a
 --  propósito, y todas deben ser rechazadas. La tercera parte hace lo que
@@ -164,21 +170,30 @@ insert into session_resources (session_id, resource_id)
 values ('ffff0000-0000-0000-0000-000000000002', 'cccc0000-0000-0000-0000-000000000006');
 
 \echo ''
-\echo '--- 27. Sobreocupación: la silla 1 ya atiende otra sesión a esa misma hora ---'
+\echo '--- 27. Sobreocupación: la silla 4 ya atiende otra sesión a esa misma hora ---'
+-- Las sesiones 1 y 6 son a la misma hora. Desde el Sprint 3 la 1 soltó su
+-- silla al reprogramarse la reserva de Mariana, así que primero toma la 4.
+begin;
 insert into session_resources (session_id, resource_id)
-values ('ffff0000-0000-0000-0000-000000000006', 'cccc0000-0000-0000-0000-000000000001');
+values ('ffff0000-0000-0000-0000-000000000001', 'cccc0000-0000-0000-0000-000000000004');
+insert into session_resources (session_id, resource_id)
+values ('ffff0000-0000-0000-0000-000000000006', 'cccc0000-0000-0000-0000-000000000004');
+rollback;
 
 \echo ''
 \echo '--- 28. Mover una sesión encima de otra que usa la misma silla ---'
+-- La sesión de hoy de Mariana es la que le dio sp_reprogramar_reserva, con la silla 1
 update sessions
-   set starts_at = (select starts_at from sessions where id = 'ffff0000-0000-0000-0000-000000000001'),
-       ends_at   = (select ends_at   from sessions where id = 'ffff0000-0000-0000-0000-000000000001')
+   set starts_at = (select se.starts_at from sessions se inner join bookings b on b.session_id = se.id
+                     where b.id = 'dddd0000-0000-0000-0000-000000000001'),
+       ends_at   = (select se.ends_at   from sessions se inner join bookings b on b.session_id = se.id
+                     where b.id = 'dddd0000-0000-0000-0000-000000000001')
  where id = 'ffff0000-0000-0000-0000-000000000011';
 
 \echo ''
 \echo '--- 29. Llevar a otra sede una sesión que ya tiene su silla asignada ---'
 update sessions set location_id = '88888888-0000-0000-0000-000000000002'
-where id = 'ffff0000-0000-0000-0000-000000000001';
+where id = (select session_id from bookings where id = 'dddd0000-0000-0000-0000-000000000001');
 
 \echo ''
 \echo '--- 30. Cambiarle el servicio a una sesión que ya tiene reservas ---'
