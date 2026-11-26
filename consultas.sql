@@ -1,6 +1,6 @@
 -- =====================================================================
 --  Consultas clave del negocio
---  Sprint 1 (1 a 14) y Sprint 2 (15 a 24)
+--  Sprint 1 (1 a 14), Sprint 2 (15 a 24) y Sprint 3 (25 a 33)
 --
 --  Cada consulta dice qué pregunta responde. Todas corren sobre las tablas
 --  de schema.sql y todas devuelven filas con los datos de seed.sql.
@@ -488,3 +488,184 @@ where s.organization_id = '66666666-0000-0000-0000-000000000001'
   and b.status in ('CONFIRMED', 'COMPLETED')
 group by s.name
 order by ingresos desc;
+
+
+-- =====================================================================
+--  Sprint 3
+--  El ciclo de vida de la reserva: HU-011 a HU-020.
+-- =====================================================================
+
+
+-- 25. ¿Qué ve el cliente cuando busca su reserva por el código? Es la
+--     consulta de HU-018: el código es una clave candidata de bookings,
+--     así que devuelve una sola fila. La hora va en la zona de la sede.
+\echo '=== 25. Una reserva buscada por su código (HU-018) ==='
+select b.code,
+       c.full_name                                         as cliente,
+       s.name                                              as servicio,
+       l.name                                              as sede,
+       se.starts_at at time zone coalesce(l.timezone, o.timezone) as hora_local,
+       b.status,
+       (select count(*) from booking_reschedules r where r.booking_id = b.id) as reprogramaciones
+from bookings b
+    inner join clients       c  on c.id  = b.client_id
+    inner join sessions      se on se.id = b.session_id
+    inner join services      s  on s.id  = se.service_id
+    inner join locations     l  on l.id  = se.location_id
+    inner join organizations o  on o.id  = s.organization_id
+where b.code = (select code from bookings where id = 'dddd0000-0000-0000-0000-000000000001');
+
+
+-- 26. ¿Qué reservas se reprogramaron, de qué hora a cuál, si fue a
+--     última hora y cuántas reprogramaciones les quedan? HU-014. "A última
+--     hora" no se guarda: es haberla movido dentro de la ventana de
+--     cancelación gratis de la política que congeló la reserva.
+\echo '=== 26. Reprogramaciones, tardías y las que quedan (HU-014) ==='
+select b.code,
+       c.full_name     as cliente,
+       de.starts_at    as estaba,
+       a.starts_at     as quedo,
+       r.reason        as motivo,
+       r.rescheduled_at > de.starts_at - make_interval(mins => p.free_cancellation_window_minutes) as tardia,
+       p.max_reschedules - count(*) over (partition by b.id) as le_quedan
+from booking_reschedules r
+    inner join bookings              b  on b.id  = r.booking_id
+    inner join clients               c  on c.id  = b.client_id
+    inner join sessions              de on de.id = r.from_session_id
+    inner join sessions              a  on a.id  = r.to_session_id
+    inner join organization_policies p  on p.id  = b.policy_id
+order by r.rescheduled_at;
+
+
+-- 27. ¿Cuántas cancelaciones tuvo cada proveedor en los últimos 30 días y
+--     cuántas fueron tardías? HU-013. Tardía es cancelar dentro de la
+--     ventana gratis de la política de la reserva, y se calcula con la
+--     hora de la cancelación y la de la cita.
+\echo '=== 27. Cancelaciones y cancelaciones tardías por proveedor (HU-013) ==='
+select o.name as proveedor,
+       count(*) as canceladas,
+       count(*) filter (where b.cancelled_at > se.starts_at - make_interval(mins => p.free_cancellation_window_minutes)) as tardias
+from bookings b
+    inner join sessions              se on se.id = b.session_id
+    inner join services              s  on s.id  = se.service_id
+    inner join organizations         o  on o.id  = s.organization_id
+    inner join organization_policies p  on p.id  = b.policy_id
+where b.status = 'CANCELLED'
+  and b.cancelled_at >= now() - interval '30 days'
+group by o.name
+order by canceladas desc;
+
+
+-- 28. ¿Qué tanto falla la gente a cada servicio? HU-016. De las citas ya
+--     cerradas, qué porcentaje fue inasistencia.
+\echo '=== 28. Porcentaje de inasistencia por servicio (HU-016) ==='
+select s.name as servicio,
+       count(*) filter (where b.status = 'COMPLETED') as atendidas,
+       count(*) filter (where b.status = 'NO_SHOW')   as inasistencias,
+       round(100.0 * count(*) filter (where b.status = 'NO_SHOW') / count(*), 1) as pct_inasistencia
+from bookings b
+    inner join sessions se on se.id = b.session_id
+    inner join services s  on s.id  = se.service_id
+where b.status in ('COMPLETED', 'NO_SHOW')
+group by s.name
+order by pct_inasistencia desc, servicio;
+
+
+-- 29. ¿Qué reservas cerró el sistema solo, y cómo quedaron? HU-016. Son
+--     los cambios de estado sin persona detrás (changed_by nulo) que dejó
+--     sp_cerrar_reservas_vencidas.
+\echo '=== 29. Reservas cerradas por el cierre automático (HU-016) ==='
+select b.code,
+       c.full_name    as cliente,
+       se.starts_at   as cita,
+       h.from_status  as estaba,
+       h.to_status    as quedo,
+       h.changed_at   as cerrada
+from booking_status_changes h
+    inner join bookings b  on b.id  = h.booking_id
+    inner join clients  c  on c.id  = b.client_id
+    inner join sessions se on se.id = b.session_id
+where h.changed_by is null
+  and h.to_status in ('COMPLETED', 'NO_SHOW')
+order by h.changed_at desc;
+
+
+-- 30. ¿Qué recordatorios salen en los próximos dos días, a quién y por qué
+--     canal? HU-015. Es lo que lee el proceso que envía los avisos.
+\echo '=== 30. Recordatorios pendientes de las próximas 48 horas (HU-015) ==='
+select n.due_at                as sale,
+       c.full_name             as cliente,
+       c.notification_channel  as canal,
+       s.name                  as servicio,
+       se.starts_at            as cita
+from booking_notices n
+    inner join bookings b  on b.id  = n.booking_id
+    inner join clients  c  on c.id  = b.client_id
+    inner join sessions se on se.id = b.session_id
+    inner join services s  on s.id  = se.service_id
+where n.kind = 'REMINDER'
+  and n.processed_at is null
+  and n.due_at < now() + interval '48 hours'
+order by n.due_at;
+
+
+-- 31. ¿Qué reservas esperan a que alguien las confirme, y qué falta?
+--     HU-012. Una queda RESERVED porque el proveedor confirma a mano,
+--     porque el cliente todavía no verifica su correo (HU-001) o porque
+--     el cliente aún no la confirma.
+\echo '=== 31. Reservas por confirmar y el motivo (HU-012) ==='
+select b.code,
+       o.name        as proveedor,
+       c.full_name   as cliente,
+       se.starts_at  as cita,
+       case when p.manual_confirmation then 'La confirma el proveedor'
+            when c.status <> 'ACTIVE'  then 'El cliente no ha verificado su correo'
+            else 'Falta que el cliente la confirme' end as falta
+from bookings b
+    inner join clients               c  on c.id  = b.client_id
+    inner join sessions              se on se.id = b.session_id
+    inner join services              s  on s.id  = se.service_id
+    inner join organizations         o  on o.id  = s.organization_id
+    inner join organization_policies p  on p.id  = b.policy_id
+where b.status = 'RESERVED'
+  and se.starts_at > now()
+order by se.starts_at;
+
+
+-- 32. ¿Qué días y a qué horas se concentra la demanda de cada proveedor?
+--     HU-020. Cuenta las reservas no canceladas de los últimos 60 días y
+--     las que vienen, por día de la semana y hora de la sede. El nombre
+--     del día sale de una lista y no de to_char, que lo daría en el
+--     idioma del servidor.
+\echo '=== 32. Demanda por día de la semana y hora (HU-020) ==='
+select o.name as proveedor,
+       (array['1 lunes', '2 martes', '3 miércoles', '4 jueves', '5 viernes', '6 sábado', '7 domingo'])
+           [extract(isodow from se.starts_at at time zone coalesce(l.timezone, o.timezone))]  as dia,
+       extract(hour from se.starts_at at time zone coalesce(l.timezone, o.timezone))    as hora,
+       count(*)                                                                         as reservas
+from bookings b
+    inner join sessions      se on se.id = b.session_id
+    inner join services      s  on s.id  = se.service_id
+    inner join organizations o  on o.id  = s.organization_id
+    inner join locations     l  on l.id  = se.location_id
+where b.status <> 'CANCELLED'
+  and se.starts_at >= now() - interval '60 days'
+group by o.name, dia, hora
+order by o.name, dia, hora;
+
+
+-- 33. ¿Cuántas franjas le quedan libres mañana a cada servicio en cada
+--     sede? HU-008 y HU-011. Llama a fn_franjas_disponibles por cada
+--     servicio y sede con lateral.
+\echo '=== 33. Franjas libres de mañana por servicio y sede (HU-008, HU-011) ==='
+select s.name      as servicio,
+       l.name      as sede,
+       count(f.*)  as franjas_libres,
+       min(f.starts_at) as primera
+from service_locations sl
+    inner join services  s on s.id = sl.service_id
+    inner join locations l on l.id = sl.location_id
+    left join lateral fn_franjas_disponibles(sl.service_id, sl.location_id, current_date + 1) f on true
+where s.status = 'ACTIVE'
+group by s.name, l.name
+order by s.name, l.name;
