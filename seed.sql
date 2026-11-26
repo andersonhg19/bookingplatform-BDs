@@ -1,6 +1,6 @@
 -- =====================================================================
 --  Datos de prueba — Plataforma de Reservas de Servicios
---  Sprint 2
+--  Sprint 3
 --
 --  Se ejecuta DESPUÉS de schema.sql. Carga un escenario pequeño pero
 --  completo, pensado para que TODAS las consultas clave devuelvan
@@ -28,7 +28,8 @@ begin
     end if;
 end $$;
 
-truncate table audit_log_changes, audit_log, resource_occupancy_daily, payments, waitlist_entries, booking_reviews,
+truncate table booking_notices, booking_reschedules, organization_booking_reminders,
+               audit_log_changes, audit_log, resource_occupancy_daily, payments, waitlist_entries, booking_reviews,
                client_status_changes, organization_status_changes, booking_status_changes,
                session_resources, bookings, sessions, agenda_exceptions, schedules, agenda_services, agendas,
                resource_maintenances, sent_emails, resources, service_resource_requirements,
@@ -103,11 +104,24 @@ insert into organization_status_changes (organization_id, from_status, to_status
     ('66666666-0000-0000-0000-000000000001', 'PENDING_APPROVAL', 'ACTIVE', 'Documentación y RUT verificados', '99999999-0000-0000-0000-000000000009', now() - interval '60 days'),
     ('66666666-0000-0000-0000-000000000002', 'PENDING_APPROVAL', 'ACTIVE', 'Habilitación sanitaria vigente',  '99999999-0000-0000-0000-000000000009', now() - interval '30 days');
 
--- Política versionada: la v1 fue reemplazada por la v2 (HU-002)
-insert into organization_policies (id, organization_id, version, booking_notice_minutes_min, booking_notice_minutes_max, free_cancellation_window_minutes, effective_from, replaced_at) values
-    ('77777777-0000-0000-0000-000000000001', '66666666-0000-0000-0000-000000000001', 1,  60, 20160, 1440, now() - interval '60 days', now() - interval '10 days'),
-    ('77777777-0000-0000-0000-000000000002', '66666666-0000-0000-0000-000000000001', 2, 120, 43200,  720, now() - interval '10 days', null),
-    ('77777777-0000-0000-0000-000000000003', '66666666-0000-0000-0000-000000000002', 1,  30, 10080, 2880, now() - interval '30 days', null);
+-- Política versionada: la v1 fue reemplazada por la v2 (HU-002).
+-- [S3] Con las reglas del ciclo de vida: la barbería confirma sola, deja
+-- reprogramar una vez y cierra como atendida la cita que nadie registró;
+-- la clínica confirma cada cita a mano, deja reprogramar dos veces y
+-- espera 48 horas para cerrar como inasistencia.
+insert into organization_policies (id, organization_id, version, booking_notice_minutes_min, booking_notice_minutes_max, free_cancellation_window_minutes,
+                                   manual_confirmation, max_reschedules, default_closure_status, auto_close_delay_hours, effective_from, replaced_at) values
+    ('77777777-0000-0000-0000-000000000001', '66666666-0000-0000-0000-000000000001', 1,  60, 20160, 1440, false, 1, 'COMPLETED', 24, now() - interval '60 days', now() - interval '10 days'),
+    ('77777777-0000-0000-0000-000000000002', '66666666-0000-0000-0000-000000000001', 2, 120, 43200,  720, false, 1, 'COMPLETED', 24, now() - interval '10 days', null),
+    ('77777777-0000-0000-0000-000000000003', '66666666-0000-0000-0000-000000000002', 1,  30, 10080, 2880, true,  2, 'NO_SHOW',   48, now() - interval '30 days', null);
+
+-- [S3] Recordatorios (HU-015): la barbería avisa un día y dos horas antes;
+-- la clínica, un día antes. Van antes de las reservas para que cada una
+-- programe los suyos al crearse.
+insert into organization_booking_reminders (organization_id, minutes_before) values
+    ('66666666-0000-0000-0000-000000000001', 1440),
+    ('66666666-0000-0000-0000-000000000001',  120),
+    ('66666666-0000-0000-0000-000000000002', 1440);
 
 insert into locations (id, organization_id, name, address, city_id, timezone, status) values
     ('88888888-0000-0000-0000-000000000001', '66666666-0000-0000-0000-000000000001', 'Sede Poblado',   'Cra 43A # 5-15',     '11111111-0000-0000-0000-000000000001', null, 'ACTIVE'),
@@ -342,6 +356,80 @@ insert into sent_emails (recipient, subject, body, sent_at) values
     ('mariana@example.com', 'Tu reserva quedó confirmada', 'Corte clásico en Sede Poblado. Te esperamos.',          now() - interval '1 days'),
     ('laura@example.com',   'Se liberó un cupo',           'Hay cupo para Barba y afeitado. Ya quedó tu reserva.',  now() - interval '4 days'),
     ('sara@example.com',    '¿Cómo te fue?',               'Cuéntanos cómo te fue en tu limpieza dental.',          now() - interval '2 days');
+
+
+-- =====================================================================
+--  [S3] El ciclo de vida de la reserva (HU-012 a HU-016)
+--  Lo que hace la aplicación se hace con los procedimientos, igual que lo
+--  haría ella. Lo que ya pasó se carga como historia, con sus fechas.
+-- =====================================================================
+
+-- HU-014: Mariana corre su corte una hora. Le queda 0 de 1 reprogramación,
+-- y la sesión de las 10:00 suelta la silla 1.
+call sp_reprogramar_reserva('dddd0000-0000-0000-0000-000000000001', current_date + 2 + time '11:00',
+                            'Me cruzo con una reunión', '44444444-0000-0000-0000-000000000001', null, null);
+
+-- HU-012: Sara reserva un corte en Envigado. La barbería no confirma a
+-- mano y Sara ya verificó su correo: queda CONFIRMED.
+call sp_crear_reserva('44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000001',
+                      '88888888-0000-0000-0000-000000000002', current_date + 3 + time '09:00', 1, null, null, null);
+
+-- HU-012: Laura pide una limpieza en la clínica, que confirma a mano: queda RESERVED.
+call sp_crear_reserva('44444444-0000-0000-0000-000000000002', 'aaaa0000-0000-0000-0000-000000000004',
+                      '88888888-0000-0000-0000-000000000003', current_date + 2 + time '09:00', 1, null, null, null);
+
+-- HU-012 y HU-013: Valentina se registró hace un rato y todavía no
+-- verifica su correo, así que su reserva queda RESERVED. Después la
+-- cancela con tiempo: no es tardía. (Daniela, la otra sin verificar, se
+-- queda sin reservas: la consulta 12 la busca.)
+insert into clients (id, full_name, document, birth_date, email, phone, city_id, notification_channel, status, created_at, updated_at) values
+    ('44444444-0000-0000-0000-000000000007', 'Valentina Gómez', '1036998877', '2000-02-14', 'valentina@example.com', '3007778899', '11111111-0000-0000-0000-000000000001', 'EMAIL', 'PENDING_VERIFICATION', now() - interval '3 hours', now() - interval '3 hours');
+do $$
+declare
+    v_reserva uuid;
+    v_codigo  varchar;
+    v_estado  varchar;
+    v_tardia  boolean;
+begin
+    call sp_crear_reserva('44444444-0000-0000-0000-000000000007', 'aaaa0000-0000-0000-0000-000000000001',
+                          '88888888-0000-0000-0000-000000000001', current_date + 4 + time '09:00', 1,
+                          v_reserva, v_codigo, v_estado);
+    call sp_cancelar_reserva(v_reserva, 'Ya no puedo ir ese día', '44444444-0000-0000-0000-000000000007', v_tardia);
+end $$;
+
+-- HU-013: una cancelación tardía de hace diez días. Camilo reservó cuando
+-- regía la v1, que da 24 horas para cancelar gratis, y canceló tres horas
+-- antes de la cita. Va como historia, con sus fechas.
+insert into sessions (id, service_id, location_id, starts_at, ends_at) values
+    ('ffff0000-0000-0000-0000-000000000015', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', current_date - 10 + time '10:00', current_date - 10 + time '10:45');
+alter table bookings disable trigger tg_bookings_reglas;
+insert into bookings (id, client_id, session_id, policy_id, attendees, total_price, currency_id, status, cancelled_at, created_at) values
+    ('dddd0000-0000-0000-0000-000000000015', '44444444-0000-0000-0000-000000000003', 'ffff0000-0000-0000-0000-000000000015', '77777777-0000-0000-0000-000000000001', 1, 45000.00, '33333333-0000-0000-0000-000000000001', 'CANCELLED', current_date - 10 + time '07:00', now() - interval '12 days');
+alter table bookings enable trigger tg_bookings_reglas;
+insert into booking_status_changes (booking_id, from_status, to_status, reason, changed_by, changed_at) values
+    ('dddd0000-0000-0000-0000-000000000015', 'CONFIRMED', 'CANCELLED', 'Se me complicó el día', '44444444-0000-0000-0000-000000000003', current_date - 10 + time '07:00');
+
+-- HU-016: dos citas que ya pasaron y nadie cerró. Se crearon antes, como
+-- cualquier reserva, y el cierre automático las cierra: la confirmada de
+-- Camilo como dice la política (COMPLETED) y la de Laura, que nunca se
+-- confirmó, como inasistencia.
+insert into sessions (id, service_id, location_id, starts_at, ends_at) values
+    ('ffff0000-0000-0000-0000-000000000016', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002', current_date - 2 + time '09:00', current_date - 2 + time '09:30'),
+    ('ffff0000-0000-0000-0000-000000000017', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002', current_date - 3 + time '10:00', current_date - 3 + time '10:30');
+insert into bookings (id, client_id, session_id, policy_id, attendees, total_price, currency_id, status, created_at) values
+    ('dddd0000-0000-0000-0000-000000000016', '44444444-0000-0000-0000-000000000003', 'ffff0000-0000-0000-0000-000000000016', '77777777-0000-0000-0000-000000000002', 1, 38000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', now() - interval '6 days'),
+    ('dddd0000-0000-0000-0000-000000000017', '44444444-0000-0000-0000-000000000002', 'ffff0000-0000-0000-0000-000000000017', '77777777-0000-0000-0000-000000000002', 1, 38000.00, '33333333-0000-0000-0000-000000000001', 'RESERVED',  now() - interval '6 days');
+insert into booking_status_changes (booking_id, from_status, to_status, changed_by, changed_at) values
+    ('dddd0000-0000-0000-0000-000000000016', null, 'CONFIRMED', '44444444-0000-0000-0000-000000000003', now() - interval '6 days'),
+    ('dddd0000-0000-0000-0000-000000000017', null, 'RESERVED',  '44444444-0000-0000-0000-000000000002', now() - interval '6 days');
+insert into session_resources (session_id, resource_id) values
+    ('ffff0000-0000-0000-0000-000000000016', 'cccc0000-0000-0000-0000-000000000006'),
+    ('ffff0000-0000-0000-0000-000000000017', 'cccc0000-0000-0000-0000-000000000006');
+call sp_cerrar_reservas_vencidas(null);
+
+-- HU-015: el backend ya envió los avisos inmediatos que se encolaron
+-- hasta aquí. Los recordatorios siguen pendientes, cada uno para su hora.
+update booking_notices set processed_at = now() where kind <> 'REMINDER';
 
 
 -- ---------- un cambio auditado ----------

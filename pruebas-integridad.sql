@@ -187,7 +187,9 @@ where id = 'ffff0000-0000-0000-0000-000000000001';
 
 \echo ''
 \echo '--- 31. Pasar una reserva de corte a una sesión de barba ---'
-update bookings set session_id = 'ffff0000-0000-0000-0000-000000000013'
+-- La sesión de barba es futura: así no la frena la anticipación (HU-014) y
+-- el rechazo es el de la regla que se prueba
+update bookings set session_id = 'ffff0000-0000-0000-0000-000000000002'
 where id = 'dddd0000-0000-0000-0000-000000000001';
 
 \echo ''
@@ -336,17 +338,21 @@ values ('eeee0000-0000-0000-0000-000000000001', '44444444-0000-0000-0000-0000000
 insert into session_resources (session_id, resource_id)
 values ('eeee0000-0000-0000-0000-0000000000c1', 'cccc0000-0000-0000-0000-000000000003');
 
+-- Desde el Sprint 3 cada cambio de estado deja su fila en la historia en la
+-- misma transacción (tg_bookings_exige_historial): primero la fila, después el cambio
+insert into booking_status_changes (booking_id, from_status, to_status, changed_by)
+values ('eeee0000-0000-0000-0000-000000000001', 'RESERVED', 'CONFIRMED', '99999999-0000-0000-0000-000000000002');
 update bookings set status = 'CONFIRMED' where id = 'eeee0000-0000-0000-0000-000000000001';
 
 insert into payments (booking_id, amount, currency_id, method)
 values ('eeee0000-0000-0000-0000-000000000001', 45000, '33333333-0000-0000-0000-000000000001', 'CARD');
 
 -- Laura cancela su barba: su sesión se queda sin reservas vivas y suelta la silla 2
-update bookings set status = 'CANCELLED', cancelled_at = now()
- where id = 'dddd0000-0000-0000-0000-000000000002';
 insert into booking_status_changes (booking_id, from_status, to_status, reason, changed_by)
 values ('dddd0000-0000-0000-0000-000000000002', 'RESERVED', 'CANCELLED', 'La silla entra a mantenimiento',
         '99999999-0000-0000-0000-000000000002');
+update bookings set status = 'CANCELLED', cancelled_at = now()
+ where id = 'dddd0000-0000-0000-0000-000000000002';
 select count(*) as recursos_que_le_quedan from session_resources
  where session_id = 'ffff0000-0000-0000-0000-000000000002';
 

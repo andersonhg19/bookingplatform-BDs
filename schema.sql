@@ -1,9 +1,24 @@
 -- =====================================================================
 --  Plataforma de Reservas de Servicios — modelo físico
---  Sprint 2
+--  Sprint 3
 --
---  PostgreSQL 16 y Supabase. Contra una base vacía crea las 32 tablas,
---  sus restricciones, índices, triggers, roles y políticas.
+--  PostgreSQL 16 y Supabase. Contra una base vacía crea las 35 tablas,
+--  sus restricciones, índices, triggers, procedimientos, roles y políticas.
+--
+--  Sprint 3: el ciclo de vida de la reserva (HU-008 a HU-019). Lo nuevo
+--  va marcado con [S3] y el detalle está en el README, en "Cambios
+--  respecto al Sprint 2":
+--    · Tres tablas: booking_reschedules (HU-014),
+--      organization_booking_reminders y booking_notices (HU-015).
+--    · Las columnas que el equipo agregó en sus migraciones V11, V14, V17
+--      y V18, con sus mismos nombres: bookings.code y cuatro reglas en
+--      organization_policies. El contador de reprogramaciones y las
+--      marcas de "tardía" de V15 y V17 no se copian: se calculan.
+--    · Siete triggers nuevos y nueve procedimientos y funciones, cada uno
+--      con la HU que atiende.
+--    · EXECUTE sólo para quien invoca cada rutina.
+--
+--  Lo que sigue es la descripción del Sprint 2, que se mantiene.
 --
 --  Parte del esquema que el equipo tiene en producción (Sprint 1 más sus
 --  migraciones V3 a V9) y lo lleva a BCNF (el detalle, en el README):
@@ -42,6 +57,17 @@ begin
     create type timerange as range (subtype = time);
 exception when duplicate_object then null;
 end $$;
+
+-- [S3] Código legible de una reserva, para buscarla y para el comprobante
+-- (HU-017, HU-018). Doce dígitos hexadecimales al azar: con un millón y
+-- medio de reservas la probabilidad de un choque es de cuatro en mil, y
+-- si ocurre lo para uk_bookings_code. Va aquí porque es el DEFAULT de
+-- bookings.code y tiene que existir antes que la tabla.
+create or replace function f_codigo_reserva() returns varchar
+language sql volatile as $$
+    select 'RSV-' || upper(substr(h, 1, 4) || '-' || substr(h, 5, 4) || '-' || substr(h, 9, 4))
+      from (select replace(gen_random_uuid()::text, '-', '') as h) x
+$$;
 
 
 -- =====================================================================
@@ -179,6 +205,13 @@ create table organization_policies (
     booking_notice_minutes_min       integer     not null,
     booking_notice_minutes_max       integer     not null,
     free_cancellation_window_minutes integer     not null,
+    -- [S3] Las reglas del ciclo de vida que el equipo sumó en V14, V17 y
+    -- V18. Son de la política y no del proveedor: así cada reserva se
+    -- rige por las que había cuando se hizo.
+    manual_confirmation              boolean     not null default false,        -- HU-012: el proveedor confirma a mano
+    max_reschedules                  integer     not null default 1,            -- HU-014
+    default_closure_status           varchar(20) not null default 'COMPLETED',  -- HU-016: cómo se cierra una confirmada sin registro
+    auto_close_delay_hours           integer     not null default 24,           -- HU-016: cuánto se espera para cerrarla
     effective_from                   timestamptz not null default now(),
     replaced_at                      timestamptz,
 
@@ -190,6 +223,9 @@ create table organization_policies (
     constraint ck_organization_policies_notice   check (booking_notice_minutes_min >= 0
                                                     and booking_notice_minutes_min <= booking_notice_minutes_max),
     constraint ck_organization_policies_cancel   check (free_cancellation_window_minutes >= 0),
+    constraint ck_organization_policies_reschedules    check (max_reschedules >= 0),
+    constraint ck_organization_policies_closure_status check (default_closure_status in ('COMPLETED', 'NO_SHOW')),
+    constraint ck_organization_policies_auto_close_hours check (auto_close_delay_hours > 0),
     constraint ck_organization_policies_vigencia check (replaced_at is null or replaced_at > effective_from),
     -- Dos versiones no pueden regir a la vez
     constraint ex_organization_policies_solape exclude using gist (
@@ -447,6 +483,7 @@ create table sessions (
 -- guardan: congelan las condiciones y la moneda vigentes al reservar.
 create table bookings (
     id           uuid          not null default gen_random_uuid(),
+    code         varchar(64)   not null default f_codigo_reserva(),   -- [S3] HU-018, V11 del equipo
     client_id    uuid          not null,
     session_id   uuid          not null,
     policy_id    uuid          not null,
@@ -459,8 +496,11 @@ create table bookings (
     updated_at   timestamptz   not null default now(),
 
     constraint pk_bookings primary key (id),
+    -- [S3] Otra clave candidata: el código identifica la reserva igual que
+    -- el id, así que bookings sigue en BCNF
+    constraint uk_bookings_code    unique (code),
 
-    constraint fk_bookings_client   foreign key (client_id)   references clients (id)               on delete restrict,
+    constraint fk_bookings_client  foreign key (client_id)   references clients (id)               on delete restrict,
     constraint fk_bookings_session  foreign key (session_id)  references sessions (id)              on delete restrict,
     constraint fk_bookings_policy   foreign key (policy_id)   references organization_policies (id) on delete restrict,
     constraint fk_bookings_currency foreign key (currency_id) references currencies (id)            on delete restrict,
@@ -468,7 +508,8 @@ create table bookings (
     constraint ck_bookings_attendees check (attendees > 0),
     constraint ck_bookings_price     check (total_price >= 0),
     constraint ck_bookings_status    check (status in ('RESERVED', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW')),
-    constraint ck_bookings_cancel    check ((status = 'CANCELLED') = (cancelled_at is not null))
+    constraint ck_bookings_cancel    check ((status = 'CANCELLED') = (cancelled_at is not null)),
+    constraint ck_bookings_code      check (code ~ '^RSV-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$')
 );
 
 -- [S2 nueva] Recursos que ocupa una sesión. Reemplaza a booking_resources:
@@ -500,6 +541,30 @@ create table booking_status_changes (
     constraint ck_booking_status_changes_cambio  check (from_status is distinct from to_status),
     -- Cancelar exige motivo, y un motivo en blanco no cuenta
     constraint ck_booking_status_changes_reason  check (to_status <> 'CANCELLED' or length(btrim(coalesce(reason, ''))) > 0)
+);
+
+-- [S3 nueva] Cada vez que una reserva pasa a otro horario (HU-014). El
+-- equipo guarda en bookings cuántas veces se reprogramó (reschedule_count,
+-- V17) y si la última fue tardía (late_reschedule). Las dos se deducen de
+-- esta tabla: la primera es un count(*) y la segunda compara
+-- rescheduled_at con el inicio de la sesión de origen y la ventana de la
+-- política. Guardarlas sería repetir un dato calculable, con el riesgo de
+-- que el contador diga 1 y la historia tenga 2. Además, al pasar la
+-- reserva a otra sesión se perdía de cuál venía.
+create table booking_reschedules (
+    id              uuid         not null default gen_random_uuid(),
+    booking_id      uuid         not null,
+    from_session_id uuid         not null,
+    to_session_id   uuid         not null,
+    reason          varchar(300),
+    rescheduled_by  uuid,                        -- quien la movió: el cliente o alguien del proveedor
+    rescheduled_at  timestamptz  not null default now(),
+    constraint pk_booking_reschedules         primary key (id),
+    constraint fk_booking_reschedules_booking foreign key (booking_id)      references bookings (id) on delete restrict,
+    constraint fk_booking_reschedules_from    foreign key (from_session_id) references sessions (id) on delete restrict,
+    constraint fk_booking_reschedules_to      foreign key (to_session_id)   references sessions (id) on delete restrict,
+    constraint ck_booking_reschedules_cambio  check (from_session_id <> to_session_id),
+    constraint ck_booking_reschedules_reason  check (reason is null or length(btrim(reason)) > 0)
 );
 
 -- Historia de estados de un proveedor (HU-003). Antes compartía tabla con
@@ -629,6 +694,38 @@ create table sent_emails (
     constraint pk_sent_emails           primary key (id),
     constraint ck_sent_emails_recipient check (recipient ~* '^[^@[:space:]]+@[^@[:space:]]+\.[a-z]{2,}$'),
     constraint ck_sent_emails_subject   check (length(btrim(subject)) > 0)
+);
+
+-- [S3 nueva] Con cuánta anticipación quiere cada proveedor que se le
+-- recuerde la cita al cliente (HU-015, V12 del equipo): 1440 y 120 son
+-- "un día antes y dos horas antes". Un recordatorio por fila, en vez de
+-- una lista en una columna, para que cada valor sea atómico.
+create table organization_booking_reminders (
+    organization_id uuid        not null,
+    minutes_before  integer     not null,
+    created_at      timestamptz not null default now(),
+    constraint pk_organization_booking_reminders         primary key (organization_id, minutes_before),
+    constraint fk_organization_booking_reminders_org     foreign key (organization_id) references organizations (id) on delete cascade,
+    -- Entre un cuarto de hora y una semana antes
+    constraint ck_organization_booking_reminders_minutes check (minutes_before between 15 and 10080)
+);
+
+-- [S3 nueva] Cola de avisos de una reserva (HU-015). La llena
+-- tg_bookings_avisos, no la aplicación: un aviso inmediato cuando la
+-- reserva se crea, se confirma, se cancela o se reprograma, y uno por
+-- cada recordatorio del proveedor. El backend envía los que ya vencieron
+-- por el canal que eligió el cliente y les pone processed_at.
+create table booking_notices (
+    id           uuid        not null default gen_random_uuid(),
+    booking_id   uuid        not null,
+    kind         varchar(20) not null,
+    due_at       timestamptz not null,           -- cuándo se debe enviar
+    processed_at timestamptz,                    -- nulo = pendiente
+    created_at   timestamptz not null default now(),
+    constraint pk_booking_notices         primary key (id),
+    constraint fk_booking_notices_booking foreign key (booking_id) references bookings (id) on delete restrict,
+    constraint ck_booking_notices_kind    check (kind in ('CREATED', 'CONFIRMED', 'CANCELLED', 'RESCHEDULED', 'REMINDER')),
+    constraint ck_booking_notices_proceso check (processed_at is null or processed_at >= created_at)
 );
 
 
@@ -1241,6 +1338,231 @@ begin
     return n;
 end $$;
 
+-- ---------------------------------------------------------------------
+--  [S3] Triggers del ciclo de vida de la reserva
+-- ---------------------------------------------------------------------
+
+-- HU-012 y HU-014: la cita cae dentro de la ventana de anticipación de la
+-- política, ni muy pronto ni muy lejos. Al crear se mide desde created_at,
+-- para que una reserva cargada como historia se juzgue con su fecha; al
+-- reprogramar, desde ahora. Las reservas que nacen cerradas son historia.
+create or replace function fn_bookings_anticipacion() returns trigger
+language plpgsql as $$
+declare
+    v_inicio timestamptz;
+    v_min    integer;
+    v_max    integer;
+    v_desde  timestamptz;
+    v_hu     text;
+begin
+    if new.status not in ('RESERVED', 'CONFIRMED')
+       or (tg_op = 'UPDATE' and new.session_id = old.session_id) then
+        return new;
+    end if;
+
+    select starts_at into v_inicio from sessions where id = new.session_id;
+    select booking_notice_minutes_min, booking_notice_minutes_max into v_min, v_max
+      from organization_policies where id = new.policy_id;
+
+    if tg_op = 'INSERT' then
+        v_desde := new.created_at;
+        v_hu    := 'HU-012';
+    else
+        v_desde := now();
+        v_hu    := 'HU-014';
+    end if;
+
+    if v_inicio < v_desde + make_interval(mins => v_min) then
+        raise exception '%: la cita se reserva con al menos % minutos de anticipación', v_hu, v_min;
+    end if;
+    if v_inicio > v_desde + make_interval(mins => v_max) then
+        raise exception '%: la cita se reserva con máximo % minutos de anticipación', v_hu, v_max;
+    end if;
+    return new;
+end $$;
+
+-- HU-012: un cliente no tiene dos reservas vivas que se crucen en el
+-- tiempo, aunque sean de proveedores distintos. Para sumar personas a un
+-- taller se aumentan los asistentes de la reserva que ya tiene. El
+-- candado por cliente evita que dos pestañas reserven a la vez.
+create or replace function fn_bookings_cruce_cliente() returns trigger
+language plpgsql as $$
+declare
+    v_inicio timestamptz;
+    v_fin    timestamptz;
+begin
+    if new.status not in ('RESERVED', 'CONFIRMED')
+       or (tg_op = 'UPDATE' and new.session_id = old.session_id
+                            and old.status in ('RESERVED', 'CONFIRMED')) then
+        return new;
+    end if;
+
+    perform pg_advisory_xact_lock(hashtextextended(new.client_id::text, 2));
+
+    select starts_at, ends_at into v_inicio, v_fin from sessions where id = new.session_id;
+
+    if exists (select 1
+                 from bookings b
+                     inner join sessions s on s.id = b.session_id
+                where b.client_id = new.client_id
+                  and b.id <> new.id
+                  and b.status in ('RESERVED', 'CONFIRMED')
+                  and s.starts_at < v_fin
+                  and s.ends_at   > v_inicio) then
+        raise exception 'HU-012: el cliente ya tiene otra reserva que se cruza con ese horario';
+    end if;
+    return new;
+end $$;
+
+-- HU-013 y HU-016: cada estado tiene su momento. Una cita que ya empezó
+-- no se cancela: se cierra como atendida o como inasistencia. Y la
+-- asistencia no se registra antes de que la cita empiece.
+create or replace function fn_bookings_momento_del_estado() returns trigger
+language plpgsql as $$
+declare
+    v_inicio timestamptz;
+begin
+    -- Los cambios desde un estado cerrado los rechaza fn_bookings_reglas
+    if new.status = old.status or old.status not in ('RESERVED', 'CONFIRMED') then
+        return new;
+    end if;
+    select starts_at into v_inicio from sessions where id = new.session_id;
+
+    if new.status = 'CANCELLED' and v_inicio <= now() then
+        raise exception 'HU-013: la cita ya empezó; se cierra como atendida o como inasistencia, no se cancela';
+    end if;
+    if new.status in ('COMPLETED', 'NO_SHOW') and v_inicio > now() then
+        raise exception 'HU-016: la asistencia se registra cuando la cita ya empezó (empieza el %)', v_inicio;
+    end if;
+    return new;
+end $$;
+
+-- HU-013 y HU-016: un cambio de estado deja su rastro en
+-- booking_status_changes en la misma transacción, con el estado de origen
+-- y el de destino. Para una cancelación, ck_booking_status_changes_reason
+-- exige además el motivo. Es la misma idea de fn_exige_motivo_cuenta
+-- (HU-003): now() es la hora de inicio de la transacción, así que una
+-- fila vieja no sirve.
+create or replace function fn_bookings_exige_historial() returns trigger
+language plpgsql as $$
+begin
+    if new.status is distinct from old.status
+       and not exists (
+           select 1 from booking_status_changes c
+            where c.booking_id = new.id
+              and c.from_status is not distinct from old.status
+              and c.to_status  = new.status
+              and c.changed_at = now()) then
+        raise exception '%: pasar la reserva a % exige registrar el cambio en booking_status_changes',
+              case new.status when 'CANCELLED' then 'HU-013' else 'HU-016' end, new.status;
+    end if;
+    return null;
+end $$;
+
+-- HU-014: una reprogramación parte de la sesión actual de una reserva
+-- viva, va a otra sesión del mismo servicio y en la misma sede, y no pasa
+-- el tope de la política que congeló la reserva. El for update serializa
+-- dos reprogramaciones simultáneas de la misma reserva: sin él, las dos
+-- contarían las mismas filas y la segunda se saltaría el tope.
+create or replace function fn_booking_reschedules_reglas() returns trigger
+language plpgsql as $$
+declare
+    v_estado  varchar(20);
+    v_sesion  uuid;
+    v_max     integer;
+    v_hechas  integer;
+begin
+    select b.status, b.session_id, p.max_reschedules into v_estado, v_sesion, v_max
+      from bookings b
+          inner join organization_policies p on p.id = b.policy_id
+     where b.id = new.booking_id
+       for update of b;
+
+    if v_estado not in ('RESERVED', 'CONFIRMED') then
+        raise exception 'HU-014: sólo se reprograma una reserva vigente (está en %)', v_estado;
+    end if;
+    if new.from_session_id <> v_sesion then
+        raise exception 'HU-014: la reprogramación parte de la sesión actual de la reserva';
+    end if;
+    if not exists (select 1
+                     from sessions de
+                         inner join sessions a on a.service_id  = de.service_id
+                                              and a.location_id = de.location_id
+                    where de.id = new.from_session_id
+                      and a.id  = new.to_session_id) then
+        raise exception 'HU-014: se reprograma al mismo servicio y en la misma sede; para cambiarlos se cancela y se reserva otra vez';
+    end if;
+
+    select count(*) into v_hechas from booking_reschedules where booking_id = new.booking_id;
+    if v_hechas >= v_max then
+        raise exception 'HU-014: la reserva llegó al tope de su política: % reprogramación(es)', v_max;
+    end if;
+    return new;
+end $$;
+
+-- HU-014: pasar una reserva a otra sesión exige dejar la reprogramación
+-- en booking_reschedules en la misma transacción. Así las reglas de
+-- arriba no se pueden saltar con un update directo.
+create or replace function fn_bookings_exige_reprogramacion() returns trigger
+language plpgsql as $$
+begin
+    if new.session_id <> old.session_id
+       and not exists (
+           select 1 from booking_reschedules r
+            where r.booking_id      = new.id
+              and r.from_session_id = old.session_id
+              and r.to_session_id   = new.session_id
+              and r.rescheduled_at  = now()) then
+        raise exception 'HU-014: pasar la reserva a otra sesión exige registrar la reprogramación en booking_reschedules';
+    end if;
+    return null;
+end $$;
+
+-- HU-015: encola los avisos de la reserva. Uno inmediato al crearla,
+-- confirmarla, cancelarla o reprogramarla, y los recordatorios del
+-- proveedor que todavía no han vencido. Al cancelar o reprogramar se
+-- descartan los recordatorios pendientes, y si la reserva sigue viva se
+-- vuelven a calcular con el horario nuevo. Es security definer porque
+-- rol_app no escribe en booking_notices: la cola sólo la llena la base.
+create or replace function fn_bookings_avisos() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+    v_tipo varchar(20);
+begin
+    if tg_op = 'INSERT' then
+        if new.status not in ('RESERVED', 'CONFIRMED') then
+            return null;                       -- historia cargada: no se avisa
+        end if;
+        v_tipo := 'CREATED';
+    elsif new.session_id <> old.session_id then
+        v_tipo := 'RESCHEDULED';
+    elsif new.status <> old.status and new.status in ('CONFIRMED', 'CANCELLED') then
+        v_tipo := new.status;
+    else
+        return null;
+    end if;
+
+    insert into booking_notices (booking_id, kind, due_at) values (new.id, v_tipo, now());
+
+    if tg_op = 'UPDATE' then
+        delete from booking_notices
+         where booking_id = new.id
+           and kind = 'REMINDER'
+           and processed_at is null;
+    end if;
+
+    if new.status in ('RESERVED', 'CONFIRMED') then
+        insert into booking_notices (booking_id, kind, due_at)
+        select new.id, 'REMINDER', se.starts_at - make_interval(mins => r.minutes_before)
+          from sessions se
+              inner join services                       s on s.id = se.service_id
+              inner join organization_booking_reminders r on r.organization_id = s.organization_id
+         where se.id = new.session_id
+           and se.starts_at - make_interval(mins => r.minutes_before) > now();
+    end if;
+    return null;
+end $$;
+
 -- updated_at
 create trigger tg_clients_updated_at          before update on clients          for each row execute function fn_set_updated_at();
 create trigger tg_organizations_updated_at    before update on organizations    for each row execute function fn_set_updated_at();
@@ -1307,10 +1629,520 @@ create trigger tg_auditar_organization_policies after insert or update or delete
 create trigger tg_auditar_services              after insert or update or delete on services              for each row execute function fn_auditar();
 create trigger tg_auditar_payments              after insert or update or delete on payments              for each row execute function fn_auditar();
 create trigger tg_auditar_booking_reviews       after insert or update or delete on booking_reviews       for each row execute function fn_auditar();
+-- [S3] Los recordatorios son configuración del proveedor, como su política
+create trigger tg_auditar_organization_booking_reminders after insert or update or delete on organization_booking_reminders for each row execute function fn_auditar();
+
+-- [S3] Ciclo de vida de la reserva. En PostgreSQL los BEFORE de una misma
+-- tabla se disparan en orden alfabético; ninguno de estos depende de otro.
+create trigger tg_bookings_anticipacion before insert or update of session_id on bookings
+    for each row execute function fn_bookings_anticipacion();
+create trigger tg_bookings_cruce_cliente before insert or update of session_id, status on bookings
+    for each row execute function fn_bookings_cruce_cliente();
+create trigger tg_bookings_momento_del_estado before update of status on bookings
+    for each row execute function fn_bookings_momento_del_estado();
+create trigger tg_bookings_exige_historial after update of status on bookings
+    for each row execute function fn_bookings_exige_historial();
+create trigger tg_booking_reschedules_reglas before insert on booking_reschedules
+    for each row execute function fn_booking_reschedules_reglas();
+create trigger tg_bookings_exige_reprogramacion after update of session_id on bookings
+    for each row execute function fn_bookings_exige_reprogramacion();
+create trigger tg_bookings_avisos after insert or update of status, session_id on bookings
+    for each row execute function fn_bookings_avisos();
 
 
 -- =====================================================================
---  10. Índices
+--  10. [S3] Procedimientos y funciones de las historias de usuario
+--
+--  Convención: sp_ para un procedimiento, que cambia datos y se llama con
+--  CALL; fn_ para una función que se consulta con SELECT; f_ para una
+--  función auxiliar que usan las demás. Los procedimientos devuelven su
+--  resultado en parámetros OUT: en el CALL se pasa null en su lugar.
+--
+--  Todas son security invoker, el comportamiento por defecto: corren con
+--  los permisos de quien las llama. Así un procedimiento no le abre a
+--  rol_app nada que sus GRANT no le den, y los triggers de las tablas
+--  revisan cada fila igual que si la aplicación escribiera directo.
+-- =====================================================================
+
+-- HU-008, HU-009 y HU-010: un recurso puede atender en [p_inicio, p_fin)
+-- si está activo, no lo ocupa otra sesión, no está en mantenimiento y, si
+-- tiene agenda propia, ese rato cae en uno de sus bloques y fuera de sus
+-- excepciones. Las horas de la agenda son las de la sede.
+create or replace function f_recurso_atiende(p_resource_id uuid, p_inicio timestamptz, p_fin timestamptz)
+returns boolean
+language sql stable as $$
+    select r.status = 'ACTIVE'
+       and not exists (select 1
+                         from session_resources sr
+                             inner join sessions s on s.id = sr.session_id
+                        where sr.resource_id = r.id
+                          and s.starts_at < p_fin
+                          and s.ends_at   > p_inicio)
+       and not exists (select 1
+                         from resource_maintenances m
+                        where m.resource_id = r.id
+                          and m.starts_at < p_fin
+                          and m.ends_at   > p_inicio)
+       and (not exists (select 1
+                          from agendas a
+                         where a.resource_id = r.id
+                           and (p_inicio at time zone z.tz)::date between a.valid_from and coalesce(a.valid_until, 'infinity'))
+            or exists (select 1
+                         from agendas a
+                             inner join schedules sc on sc.agenda_id = a.id and sc.active
+                        where a.resource_id = r.id
+                          and (p_inicio at time zone z.tz)::date between a.valid_from and coalesce(a.valid_until, 'infinity')
+                          and sc.day_of_week = extract(isodow from p_inicio at time zone z.tz)
+                          and (p_inicio at time zone z.tz) >= (p_inicio at time zone z.tz)::date + sc.start_time
+                          and (p_fin    at time zone z.tz) <= (p_inicio at time zone z.tz)::date + sc.end_time
+                          and not exists (select 1
+                                            from agenda_exceptions e
+                                           where e.agenda_id = a.id
+                                             and e.exception_date = (p_inicio at time zone z.tz)::date
+                                             and tsrange(e.exception_date + coalesce(e.start_time, time '00:00'),
+                                                         e.exception_date + coalesce(e.end_time,   time '24:00'))
+                                                 && tsrange(p_inicio at time zone z.tz, p_fin at time zone z.tz))))
+      from resources r
+          inner join locations     l on l.id = r.location_id
+          inner join organizations o on o.id = l.organization_id
+          cross join lateral (select coalesce(l.timezone, o.timezone) as tz) z
+     where r.id = p_resource_id
+$$;
+
+-- HU-008 y HU-011: las franjas en que se puede reservar un servicio en una
+-- sede un día dado, con los cupos que quedan. Una franja sale de un bloque
+-- de alguna agenda de la sede, o de uno de sus recursos, que ofrezca el
+-- servicio, cada slot_minutes y sin pisar una excepción de esa agenda
+-- (HU-007). Queda si está dentro de la anticipación de la política, si le
+-- quedan cupos y, cuando hay que abrir la sesión, si hay recursos de cada
+-- tipo que el servicio exige que puedan atender (HU-010).
+--   select * from fn_franjas_disponibles('<servicio>', '<sede>', current_date + 1);
+create or replace function fn_franjas_disponibles(p_service_id uuid, p_location_id uuid, p_fecha date)
+returns table (starts_at timestamptz, ends_at timestamptz, free_places integer)
+language sql stable as $$
+    with servicio as (
+        select s.id, s.duration_minutes, s.customer_capacity, s.organization_id,
+               coalesce(l.timezone, o.timezone) as tz
+          from services s
+              inner join service_locations sl on sl.service_id = s.id and sl.location_id = p_location_id
+              inner join locations         l  on l.id = sl.location_id
+              inner join organizations     o  on o.id = s.organization_id
+         where s.id = p_service_id
+           and s.status = 'ACTIVE'
+           and l.status = 'ACTIVE'
+           and o.status = 'ACTIVE'
+    ),
+    politica as (
+        select p.booking_notice_minutes_min as minimo,
+               p.booking_notice_minutes_max as maximo
+          from organization_policies p
+              inner join servicio sv on sv.organization_id = p.organization_id
+         where p.replaced_at is null
+    ),
+    candidatas as (
+        select distinct t as inicio_local
+          from servicio sv
+              inner join agendas         a  on f_sede_de_agenda(a.location_id, a.resource_id) = p_location_id
+              inner join agenda_services ag on ag.agenda_id = a.id and ag.service_id = sv.id
+              inner join schedules       sc on sc.agenda_id = a.id
+                                           and sc.active
+                                           and sc.day_of_week = extract(isodow from p_fecha)
+              cross join lateral generate_series(
+                         p_fecha + sc.start_time,
+                         p_fecha + sc.end_time - make_interval(mins => sv.duration_minutes),
+                         make_interval(mins => a.slot_minutes)) as t
+         where p_fecha between a.valid_from and coalesce(a.valid_until, 'infinity')
+           and not exists (select 1
+                             from agenda_exceptions e
+                            where e.agenda_id = a.id
+                              and e.exception_date = p_fecha
+                              and tsrange(p_fecha + coalesce(e.start_time, time '00:00'),
+                                          p_fecha + coalesce(e.end_time,   time '24:00'))
+                                  && tsrange(t, t + make_interval(mins => sv.duration_minutes)))
+    ),
+    franjas as (
+        select c.inicio_local at time zone sv.tz                                              as inicio,
+               (c.inicio_local + make_interval(mins => sv.duration_minutes)) at time zone sv.tz as fin
+          from candidatas c
+              cross join servicio sv
+    )
+    select f.inicio, f.fin, sv.customer_capacity - coalesce(o.ocupados, 0)
+      from franjas f
+          cross join servicio sv
+          cross join politica p
+          left join lateral (
+              select sum(b.attendees)::integer as ocupados
+                from sessions se
+                    inner join bookings b on b.session_id = se.id
+                                         and b.status in ('RESERVED', 'CONFIRMED')
+               where se.service_id  = sv.id
+                 and se.location_id = p_location_id
+                 and se.starts_at   = f.inicio
+          ) o on true
+     where f.inicio >= now() + make_interval(mins => p.minimo)
+       and f.inicio <= now() + make_interval(mins => p.maximo)
+       and sv.customer_capacity - coalesce(o.ocupados, 0) > 0
+       -- Una sesión que ya existe tiene sus recursos. Si hay que abrirla,
+       -- tiene que haber recursos libres de cada tipo exigido.
+       and (o.ocupados is not null
+            or not exists (select 1
+                             from service_resource_requirements q
+                            where q.service_id = sv.id
+                              and (select count(*)
+                                     from resources r
+                                    where r.resource_type_id = q.resource_type_id
+                                      and r.location_id = p_location_id
+                                      and f_recurso_atiende(r.id, f.inicio, f.fin)) < q.quantity_required))
+     order by f.inicio
+$$;
+
+-- HU-012 y HU-014: la sesión donde cae una reserva a esa hora. Si ya hay
+-- una con reservas vivas (un taller con cupo), esa; si no, abre una nueva
+-- y le asigna los recursos que el servicio exige (HU-010). Antes revisa
+-- que la hora sea una de las franjas de fn_franjas_disponibles.
+create or replace function f_sesion_para_reserva(p_service_id uuid, p_location_id uuid, p_starts_at timestamptz)
+returns uuid
+language plpgsql as $$
+declare
+    v_sesion    uuid;
+    v_fin       timestamptz;
+    v_fecha     date;
+    v_req       record;
+    v_asignados integer;
+begin
+    -- Dos reservas que abren la misma franja a la vez se turnan: la
+    -- segunda ve la sesión que abrió la primera y entra a ella
+    perform pg_advisory_xact_lock(hashtextextended(p_service_id::text || p_location_id::text || p_starts_at::text, 3));
+
+    select (p_starts_at at time zone coalesce(l.timezone, o.timezone))::date into v_fecha
+      from locations l
+          inner join organizations o on o.id = l.organization_id
+     where l.id = p_location_id;
+
+    select f.ends_at into v_fin
+      from fn_franjas_disponibles(p_service_id, p_location_id, v_fecha) f
+     where f.starts_at = p_starts_at;
+    if v_fin is null then
+        raise exception 'HU-008: % no es una franja disponible de ese servicio en esa sede', p_starts_at;
+    end if;
+
+    select se.id into v_sesion
+      from sessions se
+     where se.service_id  = p_service_id
+       and se.location_id = p_location_id
+       and se.starts_at   = p_starts_at
+       and exists (select 1 from bookings b
+                    where b.session_id = se.id
+                      and b.status in ('RESERVED', 'CONFIRMED'))
+     limit 1;
+    if v_sesion is not null then
+        return v_sesion;
+    end if;
+
+    insert into sessions (service_id, location_id, starts_at, ends_at)
+    values (p_service_id, p_location_id, p_starts_at, v_fin)
+    returning id into v_sesion;
+
+    for v_req in select resource_type_id, quantity_required
+                   from service_resource_requirements
+                  where service_id = p_service_id loop
+        insert into session_resources (session_id, resource_id)
+        select v_sesion, r.id
+          from resources r
+         where r.resource_type_id = v_req.resource_type_id
+           and r.location_id = p_location_id
+           and f_recurso_atiende(r.id, p_starts_at, v_fin)
+         order by r.name
+         limit v_req.quantity_required;
+
+        get diagnostics v_asignados = row_count;
+        if v_asignados < v_req.quantity_required then
+            raise exception 'HU-010: no hay % recursos libres del tipo que exige el servicio en esa franja',
+                  v_req.quantity_required;
+        end if;
+    end loop;
+    return v_sesion;
+end $$;
+
+-- HU-012: crea una reserva. Toma la política vigente del proveedor, pacta
+-- el precio en la moneda del servicio y la deja CONFIRMED si el proveedor
+-- no confirma a mano y el cliente ya verificó su correo (HU-001); si no,
+-- RESERVED. Deja el primer estado en la historia.
+--   call sp_crear_reserva('<cliente>', '<servicio>', '<sede>', '2026-12-01 10:00-05', 1, null, null, null);
+create or replace procedure sp_crear_reserva(
+    p_client_id   uuid,
+    p_service_id  uuid,
+    p_location_id uuid,
+    p_starts_at   timestamptz,
+    p_attendees   integer,
+    out o_booking_id uuid,
+    out o_code       varchar,
+    out o_status     varchar)
+language plpgsql as $$
+declare
+    v_politica uuid;
+    v_manual   boolean;
+    v_precio   numeric(12,2);
+    v_moneda   uuid;
+    v_cliente  varchar(30);
+    v_sesion   uuid;
+begin
+    select status into v_cliente from clients where id = p_client_id;
+    if v_cliente is null then
+        raise exception 'HU-012: el cliente % no existe', p_client_id;
+    end if;
+
+    select p.id, p.manual_confirmation, s.price * p_attendees, s.currency_id
+      into v_politica, v_manual, v_precio, v_moneda
+      from services s
+          inner join organization_policies p on p.organization_id = s.organization_id
+                                            and p.replaced_at is null
+     where s.id = p_service_id;
+    if v_politica is null then
+        raise exception 'HU-012: el servicio % no existe o su proveedor no tiene una política vigente', p_service_id;
+    end if;
+
+    v_sesion := f_sesion_para_reserva(p_service_id, p_location_id, p_starts_at);
+
+    o_status := case when not v_manual and v_cliente = 'ACTIVE' then 'CONFIRMED' else 'RESERVED' end;
+
+    insert into bookings (client_id, session_id, policy_id, attendees, total_price, currency_id, status)
+    values (p_client_id, v_sesion, v_politica, p_attendees, v_precio, v_moneda, o_status)
+    returning id, code into o_booking_id, o_code;
+
+    insert into booking_status_changes (booking_id, from_status, to_status, changed_by)
+    values (o_booking_id, null, o_status, p_client_id);
+end $$;
+
+-- HU-013: cancela una reserva con su motivo. Devuelve si fue tardía, es
+-- decir, dentro de la ventana en que la política ya no la deja gratis.
+-- Ese dato no se guarda: sale de la hora de la cancelación, del inicio de
+-- la cita y de la política que congeló la reserva.
+--   call sp_cancelar_reserva('<reserva>', 'Tengo un viaje', '<quien>', null);
+create or replace procedure sp_cancelar_reserva(
+    p_booking_id   uuid,
+    p_reason       varchar,
+    p_cancelled_by uuid,
+    out o_late     boolean)
+language plpgsql as $$
+declare
+    v_estado  varchar(20);
+    v_inicio  timestamptz;
+    v_ventana integer;
+begin
+    select b.status, s.starts_at, p.free_cancellation_window_minutes
+      into v_estado, v_inicio, v_ventana
+      from bookings b
+          inner join sessions              s on s.id = b.session_id
+          inner join organization_policies p on p.id = b.policy_id
+     where b.id = p_booking_id
+       for update of b;
+    if v_estado is null then
+        raise exception 'HU-013: la reserva % no existe', p_booking_id;
+    end if;
+    if v_estado not in ('RESERVED', 'CONFIRMED') then
+        raise exception 'HU-013: la reserva ya está en estado %, no se puede cancelar', v_estado;
+    end if;
+
+    insert into booking_status_changes (booking_id, from_status, to_status, reason, changed_by)
+    values (p_booking_id, v_estado, 'CANCELLED', p_reason, p_cancelled_by);
+
+    update bookings
+       set status = 'CANCELLED', cancelled_at = now()
+     where id = p_booking_id;
+
+    o_late := now() > v_inicio - make_interval(mins => v_ventana);
+end $$;
+
+-- HU-014: pasa una reserva a otra hora del mismo servicio y sede. Deja la
+-- reprogramación en la historia y devuelve la sesión nueva y cuántas
+-- reprogramaciones le quedan. La sesión vieja suelta sus recursos si se
+-- queda sin reservas (tg_sessions_libera_recursos).
+--   call sp_reprogramar_reserva('<reserva>', '2026-12-02 11:00-05', 'Cambio de turno', '<quien>', null, null);
+create or replace procedure sp_reprogramar_reserva(
+    p_booking_id     uuid,
+    p_starts_at      timestamptz,
+    p_reason         varchar,
+    p_rescheduled_by uuid,
+    out o_session_id uuid,
+    out o_remaining  integer)
+language plpgsql as $$
+declare
+    v_actual   uuid;
+    v_servicio uuid;
+    v_sede     uuid;
+    v_estado   varchar(20);
+    v_max      integer;
+begin
+    select b.session_id, s.service_id, s.location_id, b.status, p.max_reschedules
+      into v_actual, v_servicio, v_sede, v_estado, v_max
+      from bookings b
+          inner join sessions              s on s.id = b.session_id
+          inner join organization_policies p on p.id = b.policy_id
+     where b.id = p_booking_id
+       for update of b;
+    if v_actual is null then
+        raise exception 'HU-014: la reserva % no existe', p_booking_id;
+    end if;
+    if v_estado not in ('RESERVED', 'CONFIRMED') then
+        raise exception 'HU-014: sólo se reprograma una reserva vigente (está en %)', v_estado;
+    end if;
+
+    o_session_id := f_sesion_para_reserva(v_servicio, v_sede, p_starts_at);
+
+    insert into booking_reschedules (booking_id, from_session_id, to_session_id, reason, rescheduled_by)
+    values (p_booking_id, v_actual, o_session_id, p_reason, p_rescheduled_by);
+
+    update bookings set session_id = o_session_id where id = p_booking_id;
+
+    o_remaining := v_max - (select count(*) from booking_reschedules where booking_id = p_booking_id);
+end $$;
+
+-- HU-016: registra si el cliente asistió. Una reserva confirmada queda
+-- COMPLETED o NO_SHOW; una sin confirmar sólo puede quedar NO_SHOW.
+--   call sp_registrar_asistencia('<reserva>', true, '<quien>', null);
+create or replace procedure sp_registrar_asistencia(
+    p_booking_id  uuid,
+    p_attended    boolean,
+    p_recorded_by uuid,
+    out o_status  varchar)
+language plpgsql as $$
+declare
+    v_estado varchar(20);
+begin
+    select status into v_estado from bookings where id = p_booking_id for update;
+    if v_estado is null then
+        raise exception 'HU-016: la reserva % no existe', p_booking_id;
+    end if;
+    if v_estado not in ('RESERVED', 'CONFIRMED') then
+        raise exception 'HU-016: la reserva ya está cerrada como %', v_estado;
+    end if;
+    if p_attended and v_estado = 'RESERVED' then
+        raise exception 'HU-016: una reserva sin confirmar no queda como atendida; se confirma primero';
+    end if;
+
+    o_status := case when p_attended then 'COMPLETED' else 'NO_SHOW' end;
+
+    insert into booking_status_changes (booking_id, from_status, to_status, changed_by)
+    values (p_booking_id, v_estado, o_status, p_recorded_by);
+
+    update bookings set status = o_status where id = p_booking_id;
+end $$;
+
+-- HU-016: cierra las reservas que siguen vivas cuando ya pasaron las
+-- horas que da la política después del final de la cita. Una confirmada
+-- se cierra como diga la política; una que nunca se confirmó, como
+-- inasistencia. Lo corre un job (pg_cron en Supabase) o el backend; skip
+-- locked deja pasar las que alguien está tocando en ese momento.
+--   call sp_cerrar_reservas_vencidas(null);
+create or replace procedure sp_cerrar_reservas_vencidas(out o_closed integer)
+language plpgsql as $$
+declare
+    v_reserva record;
+begin
+    o_closed := 0;
+    for v_reserva in
+        select b.id, b.status,
+               case when b.status = 'CONFIRMED' then p.default_closure_status else 'NO_SHOW' end as destino,
+               p.auto_close_delay_hours
+          from bookings b
+              inner join sessions              s on s.id = b.session_id
+              inner join organization_policies p on p.id = b.policy_id
+         where b.status in ('RESERVED', 'CONFIRMED')
+           and s.ends_at + make_interval(hours => p.auto_close_delay_hours) <= now()
+           for update of b skip locked
+    loop
+        insert into booking_status_changes (booking_id, from_status, to_status, reason)
+        values (v_reserva.id, v_reserva.status, v_reserva.destino,
+                'Cierre automático: pasaron ' || v_reserva.auto_close_delay_hours || ' horas sin registrar la asistencia');
+        update bookings set status = v_reserva.destino where id = v_reserva.id;
+        o_closed := o_closed + 1;
+    end loop;
+end $$;
+
+-- HU-017: el historial de reservas de un cliente, de la más reciente a la
+-- más vieja, con lo que pagó.
+--   select * from fn_historial_cliente('<cliente>');
+create or replace function fn_historial_cliente(p_client_id uuid)
+returns table (code varchar, service varchar, provider varchar, location varchar,
+               starts_at timestamptz, status varchar, total_price numeric, currency char(3),
+               paid_amount numeric, reschedules bigint)
+language sql stable as $$
+    select b.code, s.name, o.name, l.name, se.starts_at, b.status, b.total_price, c.code,
+           (select coalesce(sum(p.amount), 0)
+              from payments p
+             where p.booking_id = b.id
+               and p.status = 'PAID'
+               and p.currency_id = b.currency_id),
+           (select count(*) from booking_reschedules r where r.booking_id = b.id)
+      from bookings b
+          inner join sessions      se on se.id = b.session_id
+          inner join services      s  on s.id  = se.service_id
+          inner join organizations o  on o.id  = s.organization_id
+          inner join locations     l  on l.id  = se.location_id
+          inner join currencies    c  on c.id  = b.currency_id
+     where b.client_id = p_client_id
+     order by se.starts_at desc
+$$;
+
+-- HU-017 y HU-018: los datos del comprobante de una reserva, buscada por
+-- su código. El backend arma el PDF con esta fila. La hora va en la zona
+-- de la sede, que es la que el cliente tiene en la cabeza.
+--   select * from fn_comprobante_reserva('RSV-1A2B-3C4D-5E6F');
+create or replace function fn_comprobante_reserva(p_code varchar)
+returns table (code varchar, status varchar, client_name varchar, client_document varchar,
+               provider varchar, provider_identification varchar, location varchar, address varchar,
+               city varchar, service varchar, local_start timestamp, attendees integer,
+               total_price numeric, currency char(3), payment_method varchar, payment_status varchar,
+               payment_reference varchar, paid_at timestamptz)
+language sql stable as $$
+    select b.code, b.status, cl.full_name, cl.document,
+           o.name, o.identification_type || ' ' || o.identification_number,
+           l.name, l.address, ci.name, s.name,
+           se.starts_at at time zone coalesce(l.timezone, o.timezone),
+           b.attendees, b.total_price, cu.code,
+           pg.method, pg.status, pg.external_reference, pg.paid_at
+      from bookings b
+          inner join clients       cl on cl.id = b.client_id
+          inner join sessions      se on se.id = b.session_id
+          inner join services      s  on s.id  = se.service_id
+          inner join organizations o  on o.id  = s.organization_id
+          inner join locations     l  on l.id  = se.location_id
+          inner join cities        ci on ci.id = l.city_id
+          inner join currencies    cu on cu.id = b.currency_id
+          -- El pago que cuenta: el vigente o el reembolsado antes que un
+          -- intento fallido, y entre iguales el más reciente
+          left join lateral (select p.method, p.status, p.external_reference, p.paid_at
+                               from payments p
+                              where p.booking_id = b.id
+                              order by p.status = 'FAILED', p.created_at desc
+                              limit 1) pg on true
+     where b.code = p_code
+$$;
+
+-- HU-019: la ocupación de los recursos de un proveedor entre dos fechas,
+-- leída del resumen diario que calcula fn_calcular_ocupacion. El
+-- porcentaje es nulo si el recurso no tuvo horas disponibles.
+--   select * from fn_reporte_ocupacion('<proveedor>', current_date - 30, current_date);
+create or replace function fn_reporte_ocupacion(p_organization_id uuid, p_from date, p_to date)
+returns table (location varchar, resource varchar, available_minutes bigint,
+               booked_minutes bigint, sessions bigint, occupancy_pct numeric)
+language sql stable as $$
+    select l.name, r.name,
+           sum(d.available_minutes), sum(d.booked_minutes), sum(d.sessions_count),
+           round(100.0 * sum(d.booked_minutes) / nullif(sum(d.available_minutes), 0), 1)
+      from resource_occupancy_daily d
+          inner join resources r on r.id = d.resource_id
+          inner join locations l on l.id = r.location_id
+     where l.organization_id = p_organization_id
+       and d.occupancy_date between p_from and p_to
+     group by l.name, r.name
+     order by l.name, r.name
+$$;
+
+
+-- =====================================================================
+--  11. Índices
 --  PostgreSQL indexa las PK y las UNIQUE, pero no las FK. Aquí van las
 --  FK que no son ya el prefijo de otra clave, y las consultas frecuentes.
 -- =====================================================================
@@ -1323,6 +2155,8 @@ create unique index ux_waitlist_entries_activa on waitlist_entries (client_id, s
     where status in ('WAITING', 'NOTIFIED');
 -- Un solo pago vivo por reserva
 create unique index ux_payments_vigente on payments (booking_id) where status in ('PENDING', 'PAID');
+-- [S3] Un recordatorio no se programa dos veces para la misma hora
+create unique index ux_booking_notices_recordatorio on booking_notices (booking_id, due_at) where kind = 'REMINDER';
 
 -- FK no cubiertas por el prefijo de otra clave
 create index ix_clients_city                         on clients (city_id);
@@ -1354,6 +2188,11 @@ create index ix_client_status_changes_client         on client_status_changes (c
 create index ix_waitlist_entries_service_location    on waitlist_entries (service_id, location_id, desired_date);
 create index ix_waitlist_entries_client              on waitlist_entries (client_id);
 create index ix_payments_booking                     on payments (booking_id);
+-- [S3] El tope de HU-014 cuenta las reprogramaciones de una reserva
+create index ix_booking_reschedules_booking          on booking_reschedules (booking_id, rescheduled_at);
+create index ix_booking_reschedules_from             on booking_reschedules (from_session_id);
+create index ix_booking_reschedules_to               on booking_reschedules (to_session_id);
+create index ix_booking_notices_booking              on booking_notices (booking_id);
 
 -- Consultas frecuentes
 create index ix_login_attempts_email_lower   on login_attempts (lower(email), attempted_at);
@@ -1361,10 +2200,16 @@ create index ix_organizations_status        on organizations (status);
 create index ix_sent_emails_recipient        on sent_emails (lower(recipient), sent_at desc);
 create index ix_resource_occupancy_daily_date on resource_occupancy_daily (occupancy_date);
 create index ix_audit_log_registro           on audit_log (table_name, record_id, changed_at desc);
+-- [S3] El proceso que envía avisos sólo mira los pendientes que ya vencieron
+create index ix_booking_notices_pendientes   on booking_notices (due_at) where processed_at is null;
+-- [S3] El cupo de una sesión y fn_franjas_disponibles suman sólo las
+-- reservas vivas, y el cierre automático de HU-016 sólo las recorre a
+-- ellas: son pocas frente a toda la historia
+create index ix_bookings_vivas               on bookings (session_id) where status in ('RESERVED', 'CONFIRMED');
 
 
 -- =====================================================================
---  11. Comentarios de catálogo
+--  12. Comentarios de catálogo
 -- =====================================================================
 
 comment on table cities                        is 'Catálogo de ciudades, con departamento';
@@ -1404,6 +2249,14 @@ comment on column bookings.total_price        is 'Precio pactado al reservar. No
 comment on column bookings.currency_id        is 'Moneda del precio pactado, la del servicio en el momento de reservar';
 comment on column sessions.ends_at            is 'Fin pactado. No se calcula con la duración del servicio, que puede cambiar después';
 comment on column audit_log.app_user_id       is 'Usuario de la aplicación, tomado de set local app.user_id si la sesión lo informa';
+comment on table booking_reschedules            is '[S3] Reprogramaciones de una reserva: de qué sesión a cuál, quién y por qué (HU-014)';
+comment on table organization_booking_reminders is '[S3] Cuántos minutos antes de la cita recuerda cada proveedor (HU-015)';
+comment on table booking_notices                is '[S3] Cola de avisos y recordatorios de una reserva, llenada por tg_bookings_avisos (HU-015)';
+comment on column bookings.code                 is '[S3] Código legible de la reserva, para buscarla y para el comprobante (HU-017, HU-018)';
+comment on column organization_policies.manual_confirmation    is '[S3] HU-012: si es true, la reserva nace RESERVED y el proveedor la confirma';
+comment on column organization_policies.max_reschedules        is '[S3] HU-014: cuántas veces se puede reprogramar una reserva';
+comment on column organization_policies.default_closure_status is '[S3] HU-016: cómo se cierra sola una reserva confirmada sin registro de asistencia';
+comment on column organization_policies.auto_close_delay_hours is '[S3] HU-016: horas tras el final de la cita antes del cierre automático';
 
 comment on function fn_clients_mayor_de_edad()                         is 'HU-001: el cliente tiene al menos 18 años al registrarse';
 comment on function fn_bookings_reglas()                               is 'HU-001 a 004: estados válidos, proveedor, servicio y sede activos, cliente no suspendido, verificado para confirmar, y cupo de la sesión';
@@ -1424,10 +2277,32 @@ comment on function fn_waitlist_entries_reserva()                      is 'La re
 comment on function fn_exige_motivo_cuenta()                           is 'HU-003: cambiar el estado de un proveedor exige el motivo en organization_status_changes';
 comment on function fn_auditar()                                       is 'Escribe en audit_log quién cambió qué fila y en audit_log_changes cada columna que cambió';
 comment on function fn_set_updated_at()                                is 'Mantiene updated_at';
+comment on function fn_calcular_ocupacion(date)                        is 'HU-019: llena resource_occupancy_daily para un día';
+comment on function f_sin_tildes(text)                                 is 'HU-005: búsqueda sin mayúsculas ni tildes';
+
+comment on function fn_bookings_anticipacion()         is '[S3] HU-012 y HU-014: la cita cae dentro de la ventana de anticipación de la política';
+comment on function fn_bookings_cruce_cliente()        is '[S3] HU-012: un cliente no tiene dos reservas vivas que se crucen';
+comment on function fn_bookings_momento_del_estado()   is '[S3] HU-013 y HU-016: no se cancela una cita que empezó ni se registra asistencia antes de que empiece';
+comment on function fn_bookings_exige_historial()      is '[S3] HU-013 y HU-016: un cambio de estado exige su fila en booking_status_changes';
+comment on function fn_booking_reschedules_reglas()    is '[S3] HU-014: reprogramar una reserva vigente, desde su sesión, al mismo servicio y sede, sin pasar el tope';
+comment on function fn_bookings_exige_reprogramacion() is '[S3] HU-014: cambiar de sesión exige su fila en booking_reschedules';
+comment on function fn_bookings_avisos()               is '[S3] HU-015: encola avisos y programa los recordatorios del proveedor';
+comment on function f_codigo_reserva()                 is '[S3] HU-018: código legible y aleatorio de una reserva';
+comment on function f_recurso_atiende(uuid, timestamptz, timestamptz)       is '[S3] HU-008 a HU-010: el recurso está activo, libre, sin mantenimiento y dentro de su agenda';
+comment on function fn_franjas_disponibles(uuid, uuid, date)                is '[S3] HU-008 y HU-011: franjas reservables de un servicio en una sede un día, con cupos libres';
+comment on function f_sesion_para_reserva(uuid, uuid, timestamptz)          is '[S3] HU-010, HU-012 y HU-014: sesión de la franja, abierta con sus recursos si hace falta';
+comment on procedure sp_crear_reserva(uuid, uuid, uuid, timestamptz, integer) is '[S3] HU-012: crea una reserva con la política vigente y el precio pactado';
+comment on procedure sp_cancelar_reserva(uuid, varchar, uuid)                 is '[S3] HU-013: cancela con motivo y dice si fue tardía';
+comment on procedure sp_reprogramar_reserva(uuid, timestamptz, varchar, uuid) is '[S3] HU-014: pasa la reserva a otra franja y deja la historia';
+comment on procedure sp_registrar_asistencia(uuid, boolean, uuid)             is '[S3] HU-016: marca la reserva como atendida o inasistencia';
+comment on procedure sp_cerrar_reservas_vencidas()                            is '[S3] HU-016: cierre automático de las reservas que nadie cerró';
+comment on function fn_historial_cliente(uuid)                              is '[S3] HU-017: historial de reservas de un cliente';
+comment on function fn_comprobante_reserva(varchar)                         is '[S3] HU-017 y HU-018: datos del comprobante de una reserva por su código';
+comment on function fn_reporte_ocupacion(uuid, date, date)                  is '[S3] HU-019: ocupación de los recursos de un proveedor en un rango';
 
 
 -- =====================================================================
---  12. Seguridad: roles, permisos y RLS
+--  13. Seguridad: roles, permisos y RLS
 --
 --  Tres roles de grupo, sin login. Una persona o un servicio entra con
 --  un usuario propio que hereda de uno de ellos, por ejemplo:
@@ -1452,9 +2327,32 @@ end $$;
 revoke create on schema public from public;
 revoke all on all tables    in schema public from public;
 revoke all on all sequences in schema public from public;
--- Las dos funciones que se invocan a mano. Las de trigger no hace falta:
--- PostgreSQL no revisa permisos al dispararlas.
-revoke all on function f_sin_tildes(text), fn_calcular_ocupacion(date) from public;
+-- [S3] PostgreSQL le da EXECUTE a PUBLIC sobre toda función o procedimiento
+-- que se crea. En el Sprint 2 se le quitaba sólo a las dos que se
+-- invocaban a mano; ahora, a todas las rutinas propias, y cada rol recibe
+-- abajo sólo las que usa. Se dejan las de btree_gist (deptype 'e', son de
+-- la extensión) y las que PostgreSQL crea con el tipo timerange (deptype
+-- 'i', como el constructor timerange(time, time)): las usan los EXCLUDE y
+-- no son nuestras. Las funciones de trigger no necesitan EXECUTE:
+-- PostgreSQL no lo revisa al dispararlas.
+do $$
+declare
+    r record;
+begin
+    for r in select p.oid::regprocedure as firma,
+                    case p.prokind when 'p' then 'procedure' else 'function' end as tipo
+               from pg_proc p
+                   inner join pg_namespace n on n.oid = p.pronamespace
+              where n.nspname = 'public'
+                and not exists (select 1 from pg_depend d
+                                 where d.classid = 'pg_proc'::regclass
+                                   and d.objid = p.oid
+                                   and d.deptype in ('e', 'i')) loop
+        execute format('revoke all on %s %s from public', r.tipo, r.firma);
+    end loop;
+end $$;
+-- Y lo mismo para lo que se cree después en este esquema
+alter default privileges in schema public revoke execute on routines from public;
 
 grant usage  on schema public to rol_admin, rol_app, rol_lectura;
 grant create on schema public to rol_admin;
@@ -1462,7 +2360,7 @@ grant create on schema public to rol_admin;
 -- rol_admin: todo
 grant all     on all tables    in schema public to rol_admin;
 grant all     on all sequences in schema public to rol_admin;
-grant execute on all functions in schema public to rol_admin;
+grant execute on all routines  in schema public to rol_admin;
 
 -- rol_app: catálogos de solo lectura (se cargan por migración)
 grant select on cities, organization_categories, currencies to rol_app;
@@ -1503,6 +2401,48 @@ grant execute on function f_sin_tildes(text) to rol_app, rol_lectura;
 -- audit_log y audit_log_changes: rol_app no las toca. Las escribe
 -- fn_auditar (security definer).
 
+-- [S3] rol_app: tablas nuevas.
+-- booking_reschedules es historia: se agrega, no se edita.
+grant select, insert on booking_reschedules to rol_app;
+-- Los recordatorios los configura el proveedor; quitar uno es borrar su fila.
+grant select, insert, delete on organization_booking_reminders to rol_app;
+-- La cola de avisos la llena tg_bookings_avisos (security definer). El
+-- backend sólo la lee y marca lo que ya envió.
+grant select on booking_notices to rol_app;
+grant update (processed_at) on booking_notices to rol_app;
+-- bookings.code no está en el grant de update de arriba: el código no cambia.
+
+-- [S3] rol_app: las rutinas de las HU. Las auxiliares también, porque
+-- todo es security invoker y PostgreSQL revisa EXECUTE en cada llamada
+-- anidada, también dentro de un trigger o de un DEFAULT.
+grant execute on procedure
+    sp_crear_reserva(uuid, uuid, uuid, timestamptz, integer),
+    sp_cancelar_reserva(uuid, varchar, uuid),
+    sp_reprogramar_reserva(uuid, timestamptz, varchar, uuid),
+    sp_registrar_asistencia(uuid, boolean, uuid),
+    sp_cerrar_reservas_vencidas()
+to rol_app;
+grant execute on function
+    fn_franjas_disponibles(uuid, uuid, date),
+    fn_historial_cliente(uuid),
+    fn_comprobante_reserva(varchar),
+    fn_reporte_ocupacion(uuid, date, date),
+    f_sesion_para_reserva(uuid, uuid, timestamptz),
+    f_recurso_atiende(uuid, timestamptz, timestamptz),
+    f_sede_de_agenda(uuid, uuid),
+    f_codigo_reserva()
+to rol_app;
+-- fn_calcular_ocupacion queda sólo para rol_admin: la corre el job diario.
+
+-- [S3] rol_lectura: las dos consultas que no muestran datos personales.
+-- El historial y el comprobante sí los tienen (nombre y documento).
+grant execute on function
+    fn_franjas_disponibles(uuid, uuid, date),
+    fn_reporte_ocupacion(uuid, date, date),
+    f_recurso_atiende(uuid, timestamptz, timestamptz),
+    f_sede_de_agenda(uuid, uuid)
+to rol_lectura;
+
 -- rol_lectura: todo para leer, menos datos personales y de seguridad
 grant select on all tables in schema public to rol_lectura;
 revoke select on clients, client_status_changes, login_attempts, sent_emails, audit_log, audit_log_changes from rol_lectura;
@@ -1541,7 +2481,7 @@ begin
 
         execute 'revoke all on all tables    in schema public from anon, authenticated';
         execute 'revoke all on all sequences in schema public from anon, authenticated';
-        execute 'revoke all on all functions in schema public from anon, authenticated';
+        execute 'revoke all on all routines  in schema public from anon, authenticated';
 
         -- Catálogos: no son datos sensibles
         execute 'grant select on cities, organization_categories, currencies to anon, authenticated';
@@ -1573,12 +2513,15 @@ end $$;
 -- =====================================================================
 --  Lo que este esquema NO garantiza
 --
---   · Que una sesión ocupe los recursos que su servicio exige:
---     service_resource_requirements dice cuántos, pero nada obliga a
---     insertar las filas en session_resources.
---   · Que una sesión caiga dentro de un bloque de agenda, fuera de una
---     excepción y fuera de un mantenimiento. Lo valida el backend al
---     ofrecer franjas.
+--   · Que una sesión ocupe los recursos que su servicio exige, y que caiga
+--     dentro de un bloque de agenda, fuera de una excepción y fuera de un
+--     mantenimiento. [S3] sp_crear_reserva y sp_reprogramar_reserva sí lo
+--     garantizan; un insert directo en sessions, no.
+--   · [S3] Que los avisos de booking_notices se envíen: la base los
+--     encola, y enviarlos es del backend.
+--   · [S3] sp_reprogramar_reserva no deja mover una reserva a una franja
+--     que se cruza con su propia hora actual: sus recursos aparecen
+--     ocupados por ella misma. Se reprograma a una hora que no se cruce.
 --   · Los candados del cupo y de los recursos suponen READ COMMITTED, el
 --     nivel por defecto. En REPEATABLE READ la consulta que sigue al
 --     candado no vería lo que la otra transacción acaba de confirmar.
