@@ -184,20 +184,35 @@ rollback;
 
 \echo ''
 \echo '--- 28. Mover una sesión encima de otra que usa la misma silla ---'
--- La sesión de hoy de Mariana es la que le dio sp_reprogramar_reserva, con la silla 1
+-- Desde el Sprint 3 una sesión con reservas no se mueve, así que la prueba
+-- usa una sesión sin reservas que tiene la silla 1 y la lleva a la hora de
+-- la cita de Mariana, que también la tiene
+begin;
+insert into sessions (id, service_id, location_id, starts_at, ends_at)
+values ('eeee0000-0000-0000-0000-0000000000f1', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001',
+        current_date + 20 + time '08:00', current_date + 20 + time '08:30');
+insert into session_resources (session_id, resource_id)
+values ('eeee0000-0000-0000-0000-0000000000f1', 'cccc0000-0000-0000-0000-000000000001');
 update sessions
    set starts_at = (select se.starts_at from sessions se inner join bookings b on b.session_id = se.id
                      where b.id = 'dddd0000-0000-0000-0000-000000000001'),
        ends_at   = (select se.ends_at   from sessions se inner join bookings b on b.session_id = se.id
                      where b.id = 'dddd0000-0000-0000-0000-000000000001')
- where id = 'ffff0000-0000-0000-0000-000000000011';
+ where id = 'eeee0000-0000-0000-0000-0000000000f1';
+rollback;
 
 \echo ''
 \echo '--- 29. Llevar a otra sede una sesión que ya tiene su silla asignada ---'
--- La sesión 11 ya pasó (su reserva quedó en inasistencia): desde el Sprint 3
--- una sesión con reservas vigentes no se mueve, y aquí se prueba la otra regla
+-- También con una sesión sin reservas, por la misma razón de la 28
+begin;
+insert into sessions (id, service_id, location_id, starts_at, ends_at)
+values ('eeee0000-0000-0000-0000-0000000000f2', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001',
+        current_date + 20 + time '08:00', current_date + 20 + time '08:30');
+insert into session_resources (session_id, resource_id)
+values ('eeee0000-0000-0000-0000-0000000000f2', 'cccc0000-0000-0000-0000-000000000001');
 update sessions set location_id = '88888888-0000-0000-0000-000000000002'
-where id = 'ffff0000-0000-0000-0000-000000000011';
+where id = 'eeee0000-0000-0000-0000-0000000000f2';
+rollback;
 
 \echo ''
 \echo '--- 30. Cambiarle el servicio a una sesión que ya tiene reservas ---'
@@ -370,7 +385,7 @@ values ('eeee0000-0000-0000-0000-000000000001', 45000, '33333333-0000-0000-0000-
 insert into booking_status_changes (booking_id, from_status, to_status, reason, changed_by)
 values ('dddd0000-0000-0000-0000-000000000002', 'RESERVED', 'CANCELLED', 'La silla entra a mantenimiento',
         '99999999-0000-0000-0000-000000000002');
-update bookings set status = 'CANCELLED', cancelled_at = now()
+update bookings set status = 'CANCELLED'
  where id = 'dddd0000-0000-0000-0000-000000000002';
 select count(*) as recursos_que_le_quedan from session_resources
  where session_id = 'ffff0000-0000-0000-0000-000000000002';

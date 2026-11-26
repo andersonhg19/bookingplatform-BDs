@@ -1078,16 +1078,16 @@ begin
         raise exception 'La sesión % no cambia de servicio: se cancela y se crea otra', new.id;
     end if;
 
-    -- [S3] HU-014: una sesión con reservas vivas no se mueve de hora ni de
-    -- sede. Moverla pasaría a sus clientes a otra hora sin la anticipación
-    -- de HU-012, sin el tope ni la historia de HU-014, sin revisar sus
-    -- cruces y con los recordatorios de HU-015 a la hora vieja. Lo que se
-    -- mueve es cada reserva, con sp_reprogramar_reserva.
+    -- [S3] HU-014: una sesión con reservas no se mueve de hora ni de sede.
+    -- Si están vigentes, moverla pasaría a sus clientes a otra hora sin la
+    -- anticipación de HU-012, sin el tope ni la historia de HU-014, sin
+    -- revisar sus cruces y con los recordatorios de HU-015 a la hora vieja:
+    -- lo que se mueve es cada reserva, con sp_reprogramar_reserva. Si ya se
+    -- cerraron, moverla reescribiría la historia: una cancelación tardía
+    -- dejaría de serlo y la ocupación de ese día cambiaría.
     if ((new.starts_at, new.ends_at, new.location_id) is distinct from (old.starts_at, old.ends_at, old.location_id))
-       and exists (select 1 from bookings
-                    where session_id = new.id
-                      and status in ('RESERVED', 'CONFIRMED')) then
-        raise exception 'HU-014: la sesión % tiene reservas vigentes; se reprograma cada reserva, no la sesión', new.id;
+       and exists (select 1 from bookings where session_id = new.id) then
+        raise exception 'HU-014: la sesión % tiene reservas; se reprograma cada reserva, no la sesión', new.id;
     end if;
 
     if new.location_id <> old.location_id
@@ -1972,9 +1972,8 @@ begin
     insert into booking_status_changes (booking_id, from_status, to_status, reason, changed_by)
     values (p_booking_id, v_estado, 'CANCELLED', p_reason, p_cancelled_by);
 
-    update bookings
-       set status = 'CANCELLED', cancelled_at = now()
-     where id = p_booking_id;
+    -- cancelled_at lo pone tg_bookings_momento_del_estado
+    update bookings set status = 'CANCELLED' where id = p_booking_id;
 
     o_late := now() > v_inicio - make_interval(mins => v_ventana);
 end $$;
@@ -2416,7 +2415,11 @@ grant select, insert on payments to rol_app;
 -- pasado se saltaría la anticipación de HU-012.
 grant select on bookings to rol_app;
 grant insert (id, client_id, session_id, policy_id, attendees, total_price, currency_id, status) on bookings to rol_app;
-grant update (session_id, attendees, status, cancelled_at) on bookings to rol_app;
+-- [S3] Sólo la sesión (al reprogramar) y el estado. cancelled_at la pone la
+-- base al cancelar y ya no se edita: de ella sale si la cancelación fue
+-- tardía. attendees tampoco: el precio se pactó por persona, y cambiar los
+-- asistentes es cancelar y reservar otra vez.
+grant update (session_id, status) on bookings to rol_app;
 grant update (status, external_reference, paid_at, refunded_at) on payments to rol_app;
 
 -- rol_app: historiales, sólo se agregan filas. Si la aplicación pudiera

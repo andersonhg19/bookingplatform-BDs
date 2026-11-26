@@ -100,7 +100,7 @@ Hubo cosas del equipo que no copié tal cual, y lo explico:
 **2. En el script.**
 
 - Ocho triggers nuevos: siete sobre la reserva y la auditoría de los recordatorios. Además,
-  `tg_sessions_coherencia` ya no deja mover una sesión con reservas vigentes (HU-014). Están en
+  `tg_sessions_coherencia` ya no deja mover una sesión que tenga reservas (HU-014). Están en
   [Triggers](#4-triggers), con su evento, su momento y su HU.
 - Cinco procedimientos y cuatro funciones de consulta, que están en
   [Procedimientos y funciones](#5-procedimientos-y-funciones). Crear y reprogramar una reserva por
@@ -123,8 +123,9 @@ cambió.
 **4. En los roles.** PostgreSQL le da `EXECUTE` a todo el mundo (`PUBLIC`) sobre cada función que se crea.
 Ahora se le quita a todas las rutinas propias, y cada rol recibe sólo las que usa. `rol_app` tiene
 permisos sobre las tres tablas nuevas, pero no puede escribir en la cola de avisos ni editar el código de
-una reserva. Además, ahora inserta en `bookings` sólo las columnas que pide el cliente: las fechas las
-pone la base, porque de ellas salen la anticipación y la cancelación tardía. `rol_lectura` puede ejecutar
+una reserva. Además, ahora inserta en `bookings` sólo las columnas que pide el cliente y sólo puede
+cambiarle la sesión y el estado: las fechas las pone la base, porque de ellas salen la anticipación y la
+cancelación tardía, y los asistentes no cambian, porque el precio se pactó por persona. `rol_lectura` puede ejecutar
 las dos funciones que no muestran datos personales. En Supabase, un cliente ve las reprogramaciones y los
 avisos de sus propias reservas. Está en [Roles y seguridad](#8-roles-y-seguridad).
 
@@ -1471,7 +1472,7 @@ Lo probé así:
 - Contra una base con los roles de Supabase (`anon`, `authenticated` y `auth.uid()`) crea además las
   políticas del Data API.
 - Lo mismo en PostgreSQL 15 y 17, y en una base con los roles de Supabase.
-- `seed.sql`, las 33 consultas, las 24 pruebas del Sprint 3 y las 51 del Sprint 2 corren encima. Cada
+- `seed.sql`, las 33 consultas, las 27 pruebas del Sprint 3 y las 51 del Sprint 2 corren encima. Cada
   prueba falla por la regla que le corresponde, y las partes de lo permitido pasan sin errores.
 - `docker compose up` deja el contenedor `healthy` con todo cargado.
 
@@ -1515,7 +1516,7 @@ Siguen igual. Ahora todos dicen a qué HU responden.
 | `tg_bookings_reglas` | `bookings` | before | insert, update | 001 a 004 | Máquina de estados de la reserva, proveedor, servicio y sede activos, cliente no suspendido y verificado para confirmar, y cupo de la sesión con un candado por sesión |
 | `tg_bookings_coherencia` | `bookings` | before | insert, update of `session_id`, `policy_id`, `currency_id` | 002, 004 | La política es del proveedor y estaba vigente al reservar, el precio va en la moneda del servicio, y una reserva sólo pasa a otra sesión del mismo servicio |
 | `tg_sessions_libera_recursos` | `bookings` | after | update of `status`, `session_id` | 010, 013, 014 | Una sesión que se queda sin reservas vivas suelta sus recursos |
-| `tg_sessions_coherencia` | `sessions` | before | update of `service_id`, `location_id`, `starts_at`, `ends_at` | 010, **014** | Una sesión no cambia de servicio, y si se mueve, sus recursos siguen en la sede y libres. **[S3]** Una sesión con reservas vigentes no se mueve: se reprograma cada reserva, para que no se salten la anticipación, el tope ni los recordatorios |
+| `tg_sessions_coherencia` | `sessions` | before | update of `service_id`, `location_id`, `starts_at`, `ends_at` | 010, **014** | Una sesión no cambia de servicio, y si se mueve, sus recursos siguen en la sede y libres. **[S3]** Una sesión con reservas no se mueve. Si están vigentes, se reprograma cada reserva, para que no se salten la anticipación, el tope ni los recordatorios; si ya se cerraron, moverla reescribiría la historia |
 | `tg_session_resources_reglas` | `session_resources` | before | insert, update of `session_id`, `resource_id` | 009, 010 | El recurso está activo, en la sede de la sesión y no lo ocupa otra sesión que se cruce |
 | `tg_waitlist_entries_reserva` | `waitlist_entries` | before | insert, update of `booking_id`, `client_id`, `service_id`, `location_id` | 011, 012 | La reserva en que terminó una espera es del mismo cliente, servicio y sede |
 | `tg_booking_reviews_completada` | `booking_reviews` | before | insert, update of `booking_id` | 016 | Sólo se califica una reserva atendida |
@@ -1533,11 +1534,12 @@ Siguen igual. Ahora todos dicen a qué HU responden.
 
 ### Comprobado
 
-Las pruebas 1 a 16 de [`pruebas-sprint3.sql`](pruebas-sprint3.sql) hacen, cada una, lo que una regla
+Las pruebas 1 a 17 de [`pruebas-sprint3.sql`](pruebas-sprint3.sql) hacen, cada una, lo que una regla
 nueva prohíbe: reservar con muy poca o con demasiada anticipación, cruzar dos citas del mismo cliente,
 cancelar una cita que ya empezó o sin motivo, registrar una asistencia antes de tiempo o sin decir si el
 cliente llegó, cambiar un estado o una sesión con un `update` directo, mover la sesión en vez de
-reprogramar la reserva, pasarse del tope de reprogramaciones o reprogramar a otro servicio. Las dieciséis
+reprogramar la reserva, mover la de una cancelación ya cerrada para que deje de ser tardía, pasarse del
+tope de reprogramaciones o reprogramar a otro servicio. Las diecisiete
 terminan en `ERROR`, y el mensaje dice qué HU lo frenó:
 
 ```
@@ -1585,11 +1587,13 @@ Del Sprint 2 siguen `fn_calcular_ocupacion(p_dia date)`, que llena el resumen di
 
 **Cómo probar los ejemplos.** Cada rutina tiene abajo un ejemplo de llamada con el resultado que da.
 Los ejemplos se pueden pegar tal cual, en el orden en que aparecen, en un `psql` sobre la base recién
-levantada con `docker compose up` (o después de correr `seed.sql`). Antes hay que fijar la zona horaria,
-porque las fechas del seed son las de Medellín:
+levantada con `docker compose up` (o después de correr `seed.sql`). Van dentro de una transacción que se
+deshace al final, para que el seed quede igual y las consultas y las pruebas sigan dando lo que dicen. La
+zona horaria se fija porque las fechas del seed son las de Medellín:
 
 ```sql
 set timezone = 'America/Bogota';
+begin;
 ```
 
 Los códigos de reserva y los `uuid` que se generan cambian en cada carga del seed.
@@ -1616,7 +1620,7 @@ call sp_crear_reserva('44444444-0000-0000-0000-000000000003',   -- Camilo
 ```
              o_booking_id             |       o_code       | o_status
 --------------------------------------+--------------------+-----------
- bfb5cbce-cae2-43fe-95ea-963cf7543cb1 | RSV-6CB7-475E-399E | CONFIRMED
+ 4753093b-f2e9-48e4-91df-25b1feae3be9 | RSV-9F22-0E89-78DC | CONFIRMED
 ```
 
 ### `sp_cancelar_reserva` · HU-013
@@ -1658,7 +1662,7 @@ call sp_reprogramar_reserva('dddd0000-0000-0000-0000-000000000002',
 ```
              o_session_id             | o_remaining
 --------------------------------------+-------------
- 6c8e85d0-6653-4704-a528-18008d7e7d6a |           0
+ 5248440f-7a66-45b9-93f5-6d31ea0f14db |           0
 ```
 
 ### `sp_registrar_asistencia` · HU-016
@@ -1667,7 +1671,8 @@ Registra si el cliente asistió. Una reserva confirmada queda `COMPLETED` (`p_at
 `NO_SHOW`. Una reserva que nunca se confirmó sólo puede quedar como inasistencia. La cita tiene que
 haber empezado.
 
-La cita de Camilo en Envigado empezó hace un cuarto de hora y llegó:
+La cita de Camilo en Envigado está en curso (el seed la pone en la media hora en que se carga) y
+llegó:
 
 ```sql
 call sp_registrar_asistencia('dddd0000-0000-0000-0000-000000000018', true,
@@ -1753,8 +1758,8 @@ from fn_historial_cliente('44444444-0000-0000-0000-000000000004') limit 2;
 ```
         code        |      service       |       starts_at        |  status   | total_price | paid_amount | reschedules
 --------------------+--------------------+------------------------+-----------+-------------+-------------+-------------
- RSV-132F-C53A-18C8 | Taller de barbería | 2026-11-30 09:00:00-05 | CONFIRMED |    60000.00 |           0 |           0
- RSV-3A95-7855-E34F | Corte clásico      | 2026-11-28 09:00:00-05 | CONFIRMED |    35000.00 |           0 |           0
+ RSV-2492-DB77-DC8C | Taller de barbería | 2026-11-30 09:00:00-05 | CONFIRMED |    60000.00 |           0 |           0
+ RSV-4D01-E9A9-7F9A | Corte clásico      | 2026-11-28 09:00:00-05 | CONFIRMED |    35000.00 |           0 |           0
 ```
 
 ### `fn_comprobante_reserva` · HU-017 y HU-018
@@ -1775,7 +1780,7 @@ from fn_comprobante_reserva((select code from bookings where id = 'dddd0000-0000
 ```
 ```
 -[ RECORD 1 ]-----------+--------------------
-code                    | RSV-02F5-ACBD-7F8B
+code                    | RSV-B01D-C6FE-79AD
 status                  | CANCELLED
 client_name             | Mariana Ospina
 provider                | Clínica Dental Sur
@@ -1807,6 +1812,12 @@ select * from fn_reporte_ocupacion('66666666-0000-0000-0000-000000000001', curre
  Sede Poblado  | Silla 2         |             16200 |             90 |        2 |           0.6
  Sede Poblado  | Silla 3         |             15600 |             30 |        1 |           0.2
  Sede Poblado  | Silla 4         |             16200 |              0 |        0 |           0.0
+```
+
+Y al final se deshace todo:
+
+```sql
+rollback;
 ```
 
 ### Comprobado
@@ -2586,7 +2597,7 @@ S = select, I = insert, U = update, D = delete.
 | Tablas que son sólo una clave: `service_locations`, `agenda_services` | todo | S I | S | — | — |
 | `services`, `schedules`, `agenda_exceptions` | todo | S I U **D** | S | — | — |
 | `sessions`, `waitlist_entries` | todo | S I U | S | S, sólo las propias | — |
-| `bookings` | todo | S; I sólo de lo que pide el cliente (no `code` ni las fechas); U sólo de sesión, asistentes, estado y fecha de cancelación | S | S, sólo las propias | — |
+| `bookings` | todo | S; I sólo de lo que pide el cliente (no `code` ni las fechas); U sólo de la sesión y el estado | S | S, sólo las propias | — |
 | `booking_reviews` | todo | S I U | S, sin el comentario | S, sólo las propias | — |
 | `session_resources` | todo | S I U | S | — | — |
 | `payments` | todo | S I, U sólo de estado, referencia y fechas | S | — | — |
@@ -2627,7 +2638,9 @@ Por qué está así:
 - **Las fechas de una reserva las pone la base.** Desde el Sprint 3 rol_app inserta en `bookings` sólo
   las columnas que pide el cliente. `created_at` es de donde `tg_bookings_anticipacion` mide la
   anticipación: si la aplicación pudiera fecharla ayer, se saltaría HU-012. Y `cancelled_at` la fija
-  `tg_bookings_momento_del_estado` al cancelar.
+  `tg_bookings_momento_del_estado` al cancelar y ya no se edita, porque de ella sale si la cancelación
+  fue tardía. Tampoco se editan los asistentes: el precio se pactó por persona, y cambiarlos es cancelar
+  y reservar otra vez. En el Sprint 2 rol_app podía editar las dos columnas.
 - **La cola de avisos la llena la base.** `booking_notices` la escribe `tg_bookings_avisos`, que es
   `security definer`. El backend sólo la lee y marca lo que envió, así que no puede inventarse un aviso
   ni borrar uno pendiente.
@@ -2726,10 +2739,11 @@ Flyway seguiría migrando con el usuario dueño (`spring.flyway.user`) y la apli
 
 ### Comprobado
 
-Las pruebas 17 a 24 de [`pruebas-sprint3.sql`](pruebas-sprint3.sql) intentan lo que cada rol *no*
+Las pruebas 18 a 27 de [`pruebas-sprint3.sql`](pruebas-sprint3.sql) intentan lo que cada rol *no*
 debe poder hacer con los objetos nuevos: rol_app escribe un aviso, cambia un código, borra una
-reprogramación, recalcula la ocupación o fecha una reserva en el pasado; rol_lectura crea una reserva o
-lee un historial; y un rol cualquiera consulta las franjas. Las ocho terminan en `permission denied`. La parte 2 hace con rol_app
+reprogramación, recalcula la ocupación, fecha una reserva en el pasado, le cambia la fecha a una
+cancelación o sube los asistentes sin tocar el precio; rol_lectura crea una reserva o lee un historial; y
+un rol cualquiera consulta las franjas. Las diez terminan en `permission denied`. La parte 2 hace con rol_app
 el ciclo completo de una reserva, procedimiento por procedimiento, sin un solo error.
 
 Las pruebas 44 a 51 de [`pruebas-integridad.sql`](pruebas-integridad.sql) intentan lo que cada rol
@@ -2767,7 +2781,7 @@ La rúbrica del Sprint 3 califica lo nuevo o modificado frente al Sprint 2. Est�
 |---|---|---|
 | 1 | MER refinado, consistente con el script y con cada cambio justificado | [Sección 1](#1-mer-refinado), [cambios](#cambios-respecto-al-sprint-2) y [normalización](#normalización) |
 | 2 | Script refinado, ejecutable en una base vacía | [`schema.sql`](schema.sql), [sección 2](#2-modelo-físico) y [sección 3](#3-schemasql) |
-| 3 | Triggers asociados a las HU, con evento, momento y propósito | [Sección 4](#4-triggers) y pruebas 1 a 16 de [`pruebas-sprint3.sql`](pruebas-sprint3.sql) |
+| 3 | Triggers asociados a las HU, con evento, momento y propósito | [Sección 4](#4-triggers) y pruebas 1 a 17 de [`pruebas-sprint3.sql`](pruebas-sprint3.sql) |
 | 4 | Procedimientos y funciones de las HU, con parámetros, resultado y ejemplo de llamada | [Sección 5](#5-procedimientos-y-funciones) y parte 2 de [`pruebas-sprint3.sql`](pruebas-sprint3.sql) |
 | 5 | Consultas ajustadas y nuevas, cada una con su pregunta y su HU | [Sección 6](#6-consultas) y [`consultas.sql`](consultas.sql) |
-| 6 | Roles y seguridad actualizados, con EXECUTE y mínimo privilegio | [Sección 8](#8-roles-y-seguridad), el final de `schema.sql` y pruebas 17 a 24 |
+| 6 | Roles y seguridad actualizados, con EXECUTE y mínimo privilegio | [Sección 8](#8-roles-y-seguridad), el final de `schema.sql` y pruebas 18 a 27 |

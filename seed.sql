@@ -431,11 +431,14 @@ insert into session_resources (session_id, resource_id) values
     ('ffff0000-0000-0000-0000-000000000017', 'cccc0000-0000-0000-0000-000000000006');
 call sp_cerrar_reservas_vencidas(null);
 
--- HU-016: una cita de Camilo que empezó hace un cuarto de hora, en
--- Envigado. Nadie ha registrado si llegó: es la que usa el ejemplo de
--- sp_registrar_asistencia del README.
+-- HU-016: una cita de Camilo en Envigado que está en curso: empezó al
+-- comienzo de la media hora en que se carga este archivo. Nadie ha
+-- registrado si llegó: es la que usa el ejemplo de sp_registrar_asistencia
+-- del README. Su hora depende de cuándo se cargue el seed.
 insert into sessions (id, service_id, location_id, starts_at, ends_at) values
-    ('ffff0000-0000-0000-0000-000000000018', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002', now() - interval '15 minutes', now() + interval '15 minutes');
+    ('ffff0000-0000-0000-0000-000000000018', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002',
+     date_trunc('hour', now()) + case when extract(minute from now()) >= 30 then interval '30 minutes' else interval '0' end,
+     date_trunc('hour', now()) + case when extract(minute from now()) >= 30 then interval '60 minutes' else interval '30 minutes' end);
 insert into bookings (id, client_id, session_id, policy_id, attendees, total_price, currency_id, status, created_at) values
     ('dddd0000-0000-0000-0000-000000000018', '44444444-0000-0000-0000-000000000003', 'ffff0000-0000-0000-0000-000000000018', '77777777-0000-0000-0000-000000000002', 1, 35000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', now() - interval '2 days');
 insert into booking_status_changes (booking_id, from_status, to_status, changed_by, changed_at) values
