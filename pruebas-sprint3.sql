@@ -1,13 +1,13 @@
 -- =====================================================================
 --  Triggers, procedimientos y permisos del Sprint 3, en acción
 --
---  Parte 1: cada trigger nuevo rechaza lo que su HU prohíbe. Las 14
+--  Parte 1: cada trigger nuevo rechaza lo que su HU prohíbe. Las 16
 --           pruebas deben terminar en ERROR, y el mensaje dice qué HU
 --           lo frenó.
 --  Parte 2: los procedimientos y funciones hacen su trabajo, llamados por
 --           rol_app como los llamaría el backend. Ninguna línea debe
 --           decir ERROR.
---  Parte 3: lo que cada rol NO puede hacer con los objetos nuevos. Las 7
+--  Parte 3: lo que cada rol NO puede hacer con los objetos nuevos. Las 8
 --           pruebas deben terminar en ERROR por permisos.
 --
 --  Todo pasa dentro de transacciones que se deshacen: el seed queda igual.
@@ -119,6 +119,16 @@ call sp_crear_reserva('44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-000
 \echo '--- 14. HU-016, sp_registrar_asistencia: dar por atendida una reserva que nunca se confirmó ---'
 call sp_registrar_asistencia('dddd0000-0000-0000-0000-000000000002', true, '99999999-0000-0000-0000-000000000002', null);
 
+\echo ''
+\echo '--- 15. HU-014, tg_sessions_coherencia: correr una hora la SESIÓN de una reserva vigente, en vez de reprogramarla ---'
+update sessions
+   set starts_at = starts_at + interval '1 hour', ends_at = ends_at + interval '1 hour'
+ where id = (select session_id from bookings where id = 'dddd0000-0000-0000-0000-000000000001');
+
+\echo ''
+\echo '--- 16. HU-016, sp_registrar_asistencia: sin decir si el cliente asistió ---'
+call sp_registrar_asistencia('dddd0000-0000-0000-0000-000000000018', null, '99999999-0000-0000-0000-000000000002', null);
+
 
 \echo ''
 \echo '#####################  Parte 2: los procedimientos funcionando  #####################'
@@ -207,35 +217,35 @@ rollback;
 \echo '#####################  Parte 3: lo que cada rol NO puede  #####################'
 
 \echo ''
-\echo '--- 15. rol_app escribe un aviso: la cola sólo la llena tg_bookings_avisos ---'
+\echo '--- 17. rol_app escribe un aviso: la cola sólo la llena tg_bookings_avisos ---'
 begin;
 set local role rol_app;
 insert into booking_notices (booking_id, kind, due_at) values ('dddd0000-0000-0000-0000-000000000001', 'REMINDER', now());
 rollback;
 
 \echo ''
-\echo '--- 16. rol_app cambia el código de una reserva: el código no cambia ---'
+\echo '--- 18. rol_app cambia el código de una reserva: el código no cambia ---'
 begin;
 set local role rol_app;
 update bookings set code = 'RSV-0000-0000-0000' where id = 'dddd0000-0000-0000-0000-000000000001';
 rollback;
 
 \echo ''
-\echo '--- 17. rol_app borra una reprogramación: la historia sólo crece ---'
+\echo '--- 19. rol_app borra una reprogramación: la historia sólo crece ---'
 begin;
 set local role rol_app;
 delete from booking_reschedules;
 rollback;
 
 \echo ''
-\echo '--- 18. rol_app recalcula la ocupación: eso es del job del administrador ---'
+\echo '--- 20. rol_app recalcula la ocupación: eso es del job del administrador ---'
 begin;
 set local role rol_app;
 select fn_calcular_ocupacion(current_date);
 rollback;
 
 \echo ''
-\echo '--- 19. rol_lectura crea una reserva: sólo lee ---'
+\echo '--- 21. rol_lectura crea una reserva: sólo lee ---'
 begin;
 set local role rol_lectura;
 call sp_crear_reserva('44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-0000-0000-000000000001',
@@ -243,19 +253,28 @@ call sp_crear_reserva('44444444-0000-0000-0000-000000000004', 'aaaa0000-0000-000
 rollback;
 
 \echo ''
-\echo '--- 20. rol_lectura pide el historial de un cliente: tiene datos personales ---'
+\echo '--- 22. rol_lectura pide el historial de un cliente: tiene datos personales ---'
 begin;
 set local role rol_lectura;
 select * from fn_historial_cliente('44444444-0000-0000-0000-000000000001');
 rollback;
 
 \echo ''
-\echo '--- 21. Un rol cualquiera (PUBLIC) consulta las franjas: PostgreSQL ya no le da EXECUTE ---'
+\echo '--- 23. Un rol cualquiera (PUBLIC) consulta las franjas: PostgreSQL ya no le da EXECUTE ---'
 begin;
 create role prueba_sin_permisos;
 grant usage on schema public to prueba_sin_permisos;
 set local role prueba_sin_permisos;
 select * from fn_franjas_disponibles('aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000001', current_date + 4);
+rollback;
+
+\echo ''
+\echo '--- 24. rol_app crea una reserva fechada ayer, para que parezca reservada con anticipación ---'
+begin;
+set local role rol_app;
+insert into bookings (client_id, session_id, policy_id, total_price, currency_id, created_at)
+values ('44444444-0000-0000-0000-000000000004', 'ffff0000-0000-0000-0000-000000000018',
+        '77777777-0000-0000-0000-000000000002', 35000, '33333333-0000-0000-0000-000000000001', now() - interval '1 day');
 rollback;
 
 \echo ''
@@ -270,7 +289,7 @@ rollback;
 
 \echo ''
 \echo '====================================================================='
-\echo ' Las pruebas 1 a 21 debieron terminar en ERROR, y la parte 2 sin'
+\echo ' Las pruebas 1 a 24 debieron terminar en ERROR, y la parte 2 sin'
 \echo ' ningún ERROR. Si no, hay un trigger, un procedimiento o un permiso'
 \echo ' mal puesto.'
 \echo '====================================================================='

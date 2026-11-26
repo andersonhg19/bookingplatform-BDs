@@ -1,7 +1,7 @@
 # Plataforma de Reservas de Servicios — Modelo de datos
 
-> **Entrega del Sprint 1, tal como se presentó.** Se conserva sin más cambios que esta nota; la entrega vigente
-> es la del Sprint 2, en la [raíz del repositorio](../README.md). El repositorio del equipo que se
+> **Entrega del Sprint 1, tal como se presentó.** Se conserva sin más cambios que esta nota. La entrega vigente
+> es la del Sprint 3, en la [raíz del repositorio](../README.md); la del Sprint 2 está en [`sprint-2/`](../sprint-2/). El repositorio del equipo que se
 > enlaza abajo se movió a
 > [`CodeFactoryBookingApp/bookingplatform`](https://github.com/CodeFactoryBookingApp/bookingplatform).
 

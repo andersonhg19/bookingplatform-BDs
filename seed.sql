@@ -399,7 +399,11 @@ end $$;
 
 -- HU-013: una cancelación tardía de hace diez días. Camilo reservó cuando
 -- regía la v1, que da 24 horas para cancelar gratis, y canceló tres horas
--- antes de la cita. Va como historia, con sus fechas.
+-- antes de la cita. Va como historia, con sus fechas: una reserva no puede
+-- nacer CANCELLED, así que se apaga sólo tg_bookings_reglas (la máquina de
+-- estados), igual que arriba con las reservas ya cerradas, y se vuelve a
+-- encender enseguida. Las demás reglas corren. En la operación una
+-- cancelación pasa por sp_cancelar_reserva, como la de Valentina.
 insert into sessions (id, service_id, location_id, starts_at, ends_at) values
     ('ffff0000-0000-0000-0000-000000000015', 'aaaa0000-0000-0000-0000-000000000002', '88888888-0000-0000-0000-000000000001', current_date - 10 + time '10:00', current_date - 10 + time '10:45');
 alter table bookings disable trigger tg_bookings_reglas;
@@ -426,6 +430,18 @@ insert into session_resources (session_id, resource_id) values
     ('ffff0000-0000-0000-0000-000000000016', 'cccc0000-0000-0000-0000-000000000006'),
     ('ffff0000-0000-0000-0000-000000000017', 'cccc0000-0000-0000-0000-000000000006');
 call sp_cerrar_reservas_vencidas(null);
+
+-- HU-016: una cita de Camilo que empezó hace un cuarto de hora, en
+-- Envigado. Nadie ha registrado si llegó: es la que usa el ejemplo de
+-- sp_registrar_asistencia del README.
+insert into sessions (id, service_id, location_id, starts_at, ends_at) values
+    ('ffff0000-0000-0000-0000-000000000018', 'aaaa0000-0000-0000-0000-000000000001', '88888888-0000-0000-0000-000000000002', now() - interval '15 minutes', now() + interval '15 minutes');
+insert into bookings (id, client_id, session_id, policy_id, attendees, total_price, currency_id, status, created_at) values
+    ('dddd0000-0000-0000-0000-000000000018', '44444444-0000-0000-0000-000000000003', 'ffff0000-0000-0000-0000-000000000018', '77777777-0000-0000-0000-000000000002', 1, 35000.00, '33333333-0000-0000-0000-000000000001', 'CONFIRMED', now() - interval '2 days');
+insert into booking_status_changes (booking_id, from_status, to_status, changed_by, changed_at) values
+    ('dddd0000-0000-0000-0000-000000000018', null, 'CONFIRMED', '44444444-0000-0000-0000-000000000003', now() - interval '2 days');
+insert into session_resources (session_id, resource_id) values
+    ('ffff0000-0000-0000-0000-000000000018', 'cccc0000-0000-0000-0000-000000000006');
 
 -- HU-015: el backend ya envió los avisos inmediatos que se encolaron
 -- hasta aquí. Los recordatorios siguen pendientes, cada uno para su hora.

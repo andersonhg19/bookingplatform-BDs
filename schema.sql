@@ -1078,6 +1078,18 @@ begin
         raise exception 'La sesión % no cambia de servicio: se cancela y se crea otra', new.id;
     end if;
 
+    -- [S3] HU-014: una sesión con reservas vivas no se mueve de hora ni de
+    -- sede. Moverla pasaría a sus clientes a otra hora sin la anticipación
+    -- de HU-012, sin el tope ni la historia de HU-014, sin revisar sus
+    -- cruces y con los recordatorios de HU-015 a la hora vieja. Lo que se
+    -- mueve es cada reserva, con sp_reprogramar_reserva.
+    if ((new.starts_at, new.ends_at, new.location_id) is distinct from (old.starts_at, old.ends_at, old.location_id))
+       and exists (select 1 from bookings
+                    where session_id = new.id
+                      and status in ('RESERVED', 'CONFIRMED')) then
+        raise exception 'HU-014: la sesión % tiene reservas vigentes; se reprograma cada reserva, no la sesión', new.id;
+    end if;
+
     if new.location_id <> old.location_id
        and exists (select 1 from session_resources sr
                        inner join resources r on r.id = sr.resource_id
@@ -1433,6 +1445,11 @@ begin
     end if;
     if new.status in ('COMPLETED', 'NO_SHOW') and v_inicio > now() then
         raise exception 'HU-016: la asistencia se registra cuando la cita ya empezó (empieza el %)', v_inicio;
+    end if;
+    -- La hora de la cancelación la pone la base, no quien cancela: de ella
+    -- sale si la cancelación fue tardía (HU-013)
+    if new.status = 'CANCELLED' then
+        new.cancelled_at := now();
     end if;
     return new;
 end $$;
@@ -1930,18 +1947,26 @@ declare
     v_inicio  timestamptz;
     v_ventana integer;
 begin
+    -- Primero se bloquea sólo la reserva y después se lee su sesión. Con el
+    -- join en el mismo for update, si otra transacción la acababa de pasar a
+    -- otra sesión, PostgreSQL relee la fila, el join deja de coincidir y la
+    -- reserva parecía no existir.
+    perform 1 from bookings where id = p_booking_id for update;
+
     select b.status, s.starts_at, p.free_cancellation_window_minutes
       into v_estado, v_inicio, v_ventana
       from bookings b
           inner join sessions              s on s.id = b.session_id
           inner join organization_policies p on p.id = b.policy_id
-     where b.id = p_booking_id
-       for update of b;
+     where b.id = p_booking_id;
     if v_estado is null then
         raise exception 'HU-013: la reserva % no existe', p_booking_id;
     end if;
     if v_estado not in ('RESERVED', 'CONFIRMED') then
         raise exception 'HU-013: la reserva ya está en estado %, no se puede cancelar', v_estado;
+    end if;
+    if length(btrim(coalesce(p_reason, ''))) = 0 then
+        raise exception 'HU-013: cancelar una reserva exige el motivo';
     end if;
 
     insert into booking_status_changes (booking_id, from_status, to_status, reason, changed_by)
@@ -1974,13 +1999,16 @@ declare
     v_estado   varchar(20);
     v_max      integer;
 begin
+    -- Igual que en sp_cancelar_reserva: se bloquea la reserva sola y después
+    -- se lee su sesión, que otra reprogramación pudo haber cambiado
+    perform 1 from bookings where id = p_booking_id for update;
+
     select b.session_id, s.service_id, s.location_id, b.status, p.max_reschedules
       into v_actual, v_servicio, v_sede, v_estado, v_max
       from bookings b
           inner join sessions              s on s.id = b.session_id
           inner join organization_policies p on p.id = b.policy_id
-     where b.id = p_booking_id
-       for update of b;
+     where b.id = p_booking_id;
     if v_actual is null then
         raise exception 'HU-014: la reserva % no existe', p_booking_id;
     end if;
@@ -2016,6 +2044,9 @@ begin
     end if;
     if v_estado not in ('RESERVED', 'CONFIRMED') then
         raise exception 'HU-016: la reserva ya está cerrada como %', v_estado;
+    end if;
+    if p_attended is null then
+        raise exception 'HU-016: hay que decir si el cliente asistió (true) o no (false)';
     end if;
     if p_attended and v_estado = 'RESERVED' then
         raise exception 'HU-016: una reserva sin confirmar no queda como atendida; se confirma primero';
@@ -2378,7 +2409,13 @@ grant select, insert on service_locations, agenda_services to rol_app;
 
 -- rol_app: una reserva o un pago no cambian de cliente, precio ni moneda
 -- después de creados. Sólo se editan las columnas que el flujo mueve.
-grant select, insert on bookings, payments to rol_app;
+grant select, insert on payments to rol_app;
+-- [S3] La reserva se crea sólo con lo que el cliente pide. code, created_at,
+-- updated_at y cancelled_at los pone la base: de created_at mide
+-- tg_bookings_anticipacion, y si la aplicación pudiera fecharlo en el
+-- pasado se saltaría la anticipación de HU-012.
+grant select on bookings to rol_app;
+grant insert (id, client_id, session_id, policy_id, attendees, total_price, currency_id, status) on bookings to rol_app;
 grant update (session_id, attendees, status, cancelled_at) on bookings to rol_app;
 grant update (status, external_reference, paid_at, refunded_at) on payments to rol_app;
 
@@ -2503,6 +2540,17 @@ begin
                      using (exists (select 1 from bookings b
                                      where b.id = booking_id and b.client_id = (select auth.uid())))';
 
+        -- [S3] Las tablas nuevas tienen RLS como todas. El cliente ve las
+        -- reprogramaciones y los avisos de sus propias reservas; los
+        -- recordatorios de un proveedor no los ve nadie desde el Data API.
+        execute 'grant select on booking_reschedules, booking_notices to authenticated';
+        execute 'create policy reprogramaciones_propias on booking_reschedules for select to authenticated
+                     using (exists (select 1 from bookings b
+                                     where b.id = booking_id and b.client_id = (select auth.uid())))';
+        execute 'create policy avisos_propios on booking_notices for select to authenticated
+                     using (exists (select 1 from bookings b
+                                     where b.id = booking_id and b.client_id = (select auth.uid())))';
+
         raise notice 'Políticas de Supabase creadas para anon y authenticated';
     else
         raise notice 'Sin roles de Supabase (PostgreSQL local): se omiten las políticas del Data API';
@@ -2519,6 +2567,10 @@ end $$;
 --     garantizan; un insert directo en sessions, no.
 --   · [S3] Que los avisos de booking_notices se envíen: la base los
 --     encola, y enviarlos es del backend.
+--   · [S3] Una reserva insertada directo, sin sp_crear_reserva, no se
+--     revisa contra la confirmación manual del proveedor ni contra el
+--     precio del servicio, y no deja su primer estado en la historia. Las
+--     demás reglas sí corren: anticipación, cruce, cupo, estado y política.
 --   · [S3] sp_reprogramar_reserva no deja mover una reserva a una franja
 --     que se cruza con su propia hora actual: sus recursos aparecen
 --     ocupados por ella misma. Se reprograma a una hora que no se cruce.

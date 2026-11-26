@@ -1,5 +1,11 @@
 # Plataforma de Reservas de Servicios — Modelo de datos
 
+> **Entrega del Sprint 2, tal como se presentó** (etiqueta
+> [`sprint-2`](https://github.com/andersonhg19/bookingplatform-BDs/tree/sprint-2)). Se conserva sin más
+> cambios que esta nota y el enlace a `sprint-1/`, que ahora está un nivel arriba. La entrega vigente es la
+> del Sprint 3, en la [raíz del repositorio](../README.md), y lo que cambió está en
+> [Cambios respecto al Sprint 2](../README.md#cambios-respecto-al-sprint-2).
+
 Sprint 2 · Bases de Datos · CodeF@ctory 2026-II<br>
 Anderson Herrera Guzmán · Facultad de Ingeniería, Universidad de Antioquia
 

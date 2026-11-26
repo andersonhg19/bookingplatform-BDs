@@ -492,7 +492,7 @@ order by ingresos desc;
 
 -- =====================================================================
 --  Sprint 3
---  El ciclo de vida de la reserva: HU-011 a HU-020.
+--  El ciclo de vida de la reserva: HU-008 a HU-020.
 -- =====================================================================
 
 

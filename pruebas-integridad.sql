@@ -4,7 +4,7 @@
 --
 --  Las del Sprint 3 (triggers, procedimientos y permisos nuevos) están en
 --  pruebas-sprint3.sql. Aquí sólo cambió lo necesario para que cada
---  prueba siga fallando por su propia regla: la 27, la 28, la 29 y la 31
+--  prueba siga fallando por su propia regla: la 18, la 27, la 28, la 29 y la 31
 --  apuntan a sesiones que siguen teniendo sus recursos, y la parte 3 deja
 --  la historia antes de cada cambio de estado.
 --
@@ -119,7 +119,9 @@ values ('44444444-0000-0000-0000-000000000003', 'aaaa0000-0000-0000-0000-0000000
 
 \echo ''
 \echo '--- 18. Una reserva cancelada sin fecha de cancelación ---'
-update bookings set status = 'CANCELLED' where id = 'dddd0000-0000-0000-0000-000000000002';
+-- Desde el Sprint 3 la fecha la pone la base al cancelar, así que la forma de
+-- dejar una cancelada sin fecha es borrársela a una que ya lo está
+update bookings set cancelled_at = null where id = 'dddd0000-0000-0000-0000-000000000006';
 
 \echo ''
 \echo '--- 19. Autorregistro de un menor de edad (HU-001) ---'
@@ -192,8 +194,10 @@ update sessions
 
 \echo ''
 \echo '--- 29. Llevar a otra sede una sesión que ya tiene su silla asignada ---'
+-- La sesión 11 ya pasó (su reserva quedó en inasistencia): desde el Sprint 3
+-- una sesión con reservas vigentes no se mueve, y aquí se prueba la otra regla
 update sessions set location_id = '88888888-0000-0000-0000-000000000002'
-where id = (select session_id from bookings where id = 'dddd0000-0000-0000-0000-000000000001');
+where id = 'ffff0000-0000-0000-0000-000000000011';
 
 \echo ''
 \echo '--- 30. Cambiarle el servicio a una sesión que ya tiene reservas ---'
